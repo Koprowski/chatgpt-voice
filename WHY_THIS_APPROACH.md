@@ -33,15 +33,17 @@ Send recorded audio to OpenAI's cloud API endpoint.
 
 ### Option C: ChatGPT Web Transcription Daemon (this approach)
 
-Automate ChatGPT's free web interface voice dictation via a background Playwright browser.
+Automate ChatGPT's web interface voice dictation via a background Playwright browser.
 
-**Costs:** Free (uses ChatGPT free tier, which includes voice dictation).
+**Requirements:** You must have a **paid ChatGPT account** (e.g. ChatGPT Plus) and be signed in. Voice dictation is available to paid subscribers.
+
+**Costs:** No additional fee beyond your ChatGPT subscription; voice dictation is included for paid accounts.
 
 **Advantages over both alternatives:**
 
 1. **Fast.** ChatGPT's web transcription uses their optimized server-side Whisper infrastructure. Transcription typically completes in 1-2 seconds regardless of your local hardware. No GPU required.
 
-2. **Free.** No API key, no per-minute charges. ChatGPT's free tier includes the dictation feature. You're using something you already have access to.
+2. **No extra API cost.** No separate API key or per-minute audio charges. Voice dictation is included with a paid ChatGPT subscription. You use a feature you already have access to.
 
 3. **Accurate.** Same Whisper large model running on OpenAI's optimized infrastructure. Proper punctuation, capitalization, handling of technical terms, numbers, and mixed-language content. No quality compromises from using a smaller model.
 

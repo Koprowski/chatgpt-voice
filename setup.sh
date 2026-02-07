@@ -72,9 +72,9 @@ echo
 echo "=== Setup complete ==="
 echo
 echo "Next steps:"
-echo "  1. Log in to ChatGPT (one-time):"
+echo "  1. Log in to ChatGPT (one-time; requires paid account, e.g. Plus):"
 echo "     $VENV/bin/python3 -m chatgpt_voice login"
-echo "     (Log in to ChatGPT in the browser that opens, then Ctrl+C)"
+echo "     (Sign in with your paid ChatGPT account in the browser that opens, then Ctrl+C)"
 echo
 echo "  2. Start the daemon:"
 echo "     $VENV/bin/python3 -m chatgpt_voice start"

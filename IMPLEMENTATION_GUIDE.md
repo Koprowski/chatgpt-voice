@@ -2,7 +2,9 @@
 
 ## Overview
 
-A background daemon that piggybacks ChatGPT's free web-based voice transcription (server-side Whisper) to provide system-wide dictation. Press a keyboard shortcut to start recording, press again to stop — transcribed text is copied to clipboard and auto-pasted into the currently focused text field.
+A background daemon that piggybacks ChatGPT's web-based voice transcription (server-side Whisper) to provide system-wide dictation. Press a keyboard shortcut to start recording, press again to stop — transcribed text is copied to clipboard and auto-pasted into the currently focused text field.
+
+**Requirements:** You must be signed into a **paid ChatGPT account** (e.g. ChatGPT Plus). Voice dictation in the ChatGPT web UI is available to paid subscribers. See [LEGAL.md](LEGAL.md) for terms and disclaimer.
 
 **Supported platforms:** Linux (Wayland/X11), Windows, macOS.
 
