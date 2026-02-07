@@ -1,6 +1,6 @@
 # Create Startup shortcuts: daemon in terminal + optional recording visualizer.
 # Run from the chatgpt-voice folder: powershell -ExecutionPolicy Bypass -File install_startup.ps1
-# Uses this folder's venv (e.g. run from C:\Tools\chatgpt-voice if that's your install).
+# Uses this folder's venv (run from your install directory).
 
 $ErrorActionPreference = "Stop"
 $DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition

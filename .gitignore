@@ -3,3 +3,15 @@ __pycache__/
 *.pyc
 *.egg-info/
 a.out
+
+# Secrets / local-only (do not commit)
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+config.json
+daemon.log
+daemon.pid
+visualizer.lock
