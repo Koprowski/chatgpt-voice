@@ -347,14 +347,14 @@ class VoiceDaemon:
                 )
                 await self._show_window()
                 return {"status": "login_required"}
-            # Debug: avoid logging button labels (can include sensitive UI text)
+            # Debug: dump all buttons on the page
             try:
                 btns = await self.page.evaluate("""() => {
                     return Array.from(document.querySelectorAll('button'))
                         .map(b => b.getAttribute('aria-label') || b.innerText.substring(0, 30) || '(no label)')
                         .filter(l => l !== '(no label)');
                 }""")
-                log.error("Mic button not found. Found %d labeled buttons.", len(btns))
+                log.error("Mic button not found. Available buttons: %s", btns)
             except Exception:
                 log.error("Mic button not found and could not dump page buttons")
             platform_utils.send_notification("Error", "Could not find microphone button.")
