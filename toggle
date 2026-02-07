@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Send toggle command to the ChatGPT Voice daemon.
+Designed to be called from a GNOME custom keyboard shortcut.
+
+Thin wrapper — all logic lives in chatgpt_voice.ipc.
+"""
+import subprocess
+import sys
+import os
+from pathlib import Path
+
+# Ensure the package is importable even when run directly via venv python
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from chatgpt_voice import ipc
+from chatgpt_voice.platform_utils import send_notification
+
+
+def main():
+    if not ipc.is_daemon_running():
+        send_notification("ChatGPT Voice", "Daemon not running. Starting...")
+        # Start daemon in background
+        venv_python = _HERE / "venv" / "bin" / "python3"
+        python = str(venv_python) if venv_python.exists() else sys.executable
+        from chatgpt_voice.config import log_file, config_dir
+        config_dir().mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [python, "-m", "chatgpt_voice", "start"],
+            stdout=subprocess.DEVNULL,
+            stderr=open(log_file(), "a"),
+            start_new_session=True,
+        )
+        send_notification("ChatGPT Voice", "Daemon starting. Try again in a few seconds.")
+        return
+
+    resp = ipc.send_command("toggle")
+    if resp is None:
+        send_notification("Error", "Could not connect to daemon.")
+
+
+if __name__ == "__main__":
+    main()

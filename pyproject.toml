@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatgpt-voice"
+version = "0.2.0"
+description = "System-wide voice dictation via ChatGPT's web transcription"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.40",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+linux = ["evdev>=1.6"]
+windows = ["pyperclip>=1.8", "plyer>=2.1", "pynput>=1.7", "sounddevice>=0.4.6", "win10toast"]
+macos = ["pynput>=1.7"]
+all = ["evdev>=1.6", "pyperclip>=1.8", "plyer>=2.1", "pynput>=1.7"]
+
+[project.scripts]
+chatgpt-voice = "chatgpt_voice.__main__:main"
