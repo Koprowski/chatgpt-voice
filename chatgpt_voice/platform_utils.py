@@ -7,6 +7,7 @@ and global hotkey registration.
 
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -164,35 +165,36 @@ def _notify_windows(title: str, body: str, timeout: float = 3) -> None:
             timeout=timeout,
         )
     except Exception:
-        _ps_body = (body or " ").replace("'", "''")
-        _ps_title = title.replace("'", "''")
+        env = {**os.environ, "_NOTIFY_TITLE": title, "_NOTIFY_BODY": body or " "}
         subprocess.Popen(
             [
                 "powershell", "-NoProfile", "-Command",
-                f"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
-                f"$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(0); "
-                f"$text = $template.GetElementsByTagName('text'); "
-                f"$text[0].AppendChild($template.CreateTextNode('{_ps_title}: {_ps_body}')) | Out-Null; "
-                f"$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('ChatGPT Voice'); "
-                f"$notifier.Show([Windows.UI.Notifications.ToastNotification]::new($template))",
+                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
+                "$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(0); "
+                "$text = $template.GetElementsByTagName('text'); "
+                "$text[0].AppendChild($template.CreateTextNode($env:_NOTIFY_TITLE + ': ' + $env:_NOTIFY_BODY)) | Out-Null; "
+                "$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('ChatGPT Voice'); "
+                "$notifier.Show([Windows.UI.Notifications.ToastNotification]::new($template))",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
 
 
 def _notify_macos(title: str, body: str) -> None:
     """macOS notification via osascript."""
-    body_escaped = (body or "").replace('"', '\\"')
-    title_escaped = title.replace('"', '\\"')
+    script = f'display notification {_applescript_string(body or "")} with title {_applescript_string(title)}'
     subprocess.Popen(
-        [
-            "osascript", "-e",
-            f'display notification "{body_escaped}" with title "{title_escaped}"',
-        ],
+        ["osascript", "-e", script],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _applescript_string(s: str) -> str:
+    """Safely quote a string for AppleScript by escaping backslashes and double quotes."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 # ---------------------------------------------------------------------------
