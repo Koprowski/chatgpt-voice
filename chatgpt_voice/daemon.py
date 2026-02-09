@@ -144,41 +144,25 @@ class VoiceDaemon:
         )
 
     async def _minimize_window(self):
-        """Hide the Chromium window by making it tiny and off-screen.
+        """Minimize the Chromium window via CDP windowState=minimized.
 
-        We avoid true minimization because Chromium suspends/freezes pages
-        in minimized windows, which breaks page.evaluate() and
-        wait_for_selector().
+        The page has a visibility override script injected so that
+        page.evaluate() and wait_for_selector() still work when minimized.
         """
         try:
             cdp = await self.page.context.new_cdp_session(self.page)
             window = await cdp.send("Browser.getWindowForTarget")
-            # First ensure it's in "normal" state (not maximized)
             await cdp.send(
                 "Browser.setWindowBounds",
                 {
                     "windowId": window["windowId"],
-                    "bounds": {"windowState": "normal"},
-                },
-            )
-            await asyncio.sleep(0.1)
-            # Then make it tiny and move it far off-screen
-            await cdp.send(
-                "Browser.setWindowBounds",
-                {
-                    "windowId": window["windowId"],
-                    "bounds": {
-                        "left": -10000,
-                        "top": -10000,
-                        "width": 800,
-                        "height": 600,
-                    },
+                    "bounds": {"windowState": "minimized"},
                 },
             )
             await cdp.detach()
-            log.info("Window hidden off-screen")
+            log.info("Window minimized via CDP")
         except Exception as e:
-            log.warning("Could not hide window: %s", e)
+            log.warning("Could not minimize window via CDP: %s", e)
 
     async def _show_window(self):
         """Bring the browser window back on-screen for user interaction."""

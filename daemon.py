@@ -82,15 +82,50 @@ def load_config():
         return DEFAULT_CONFIG
 
 
-def notify(title, body=""):
-    try:
-        subprocess.Popen(
-            ["notify-send", "-a", "ChatGPT Voice", "-t", "3000", title, body],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+def notify(title, body="", timeout_ms=3000):
+    """Show a desktop notification that auto-closes after timeout_ms.
+
+    Uses gdbus to send via D-Bus and then close the notification,
+    since GNOME Shell ignores notify-send timeout hints.
+    """
+    import threading
+
+    def _send():
+        try:
+            result = subprocess.run(
+                ["gdbus", "call", "--session",
+                 "--dest", "org.freedesktop.Notifications",
+                 "--object-path", "/org/freedesktop/Notifications",
+                 "--method", "org.freedesktop.Notifications.Notify",
+                 "ChatGPT Voice",  # app_name
+                 "0",              # replaces_id
+                 "",               # icon
+                 title, body,
+                 "[]",             # actions
+                 "{}",             # hints
+                 str(timeout_ms)],
+                capture_output=True, text=True, timeout=5,
+            )
+            # Parse notification ID from "(uint32 N,)" response
+            out = result.stdout.strip()
+            if out.startswith("(uint32 "):
+                nid = out.split()[1].rstrip(",)")
+                import time
+                time.sleep(timeout_ms / 1000.0)
+                subprocess.run(
+                    ["gdbus", "call", "--session",
+                     "--dest", "org.freedesktop.Notifications",
+                     "--object-path", "/org/freedesktop/Notifications",
+                     "--method", "org.freedesktop.Notifications.CloseNotification",
+                     nid],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 class VoiceDaemon:
@@ -103,6 +138,7 @@ class VoiceDaemon:
         self.context = None
         self.server = None
         self._pre_record_text = ""
+        self._visualizer_proc = None
 
     async def find_element(self, selector_list):
         """Try multiple selectors via JS aria-label matching.
@@ -154,7 +190,20 @@ class VoiceDaemon:
             "--disable-blink-features=AutomationControlled",
             "--no-first-run",
             "--no-default-browser-check",
+            "--hide-crash-restore-bubble",
         ]
+
+        # Clear crash state so Chrome doesn't show "Restore pages?" dialog
+        for subdir in (PROFILE_DIR, PROFILE_DIR / "Default"):
+            prefs_file = subdir / "Preferences"
+            if prefs_file.exists():
+                try:
+                    prefs = json.loads(prefs_file.read_text())
+                    if prefs.get("profile", {}).get("exit_type") == "Crashed":
+                        prefs["profile"]["exit_type"] = "Normal"
+                        prefs_file.write_text(json.dumps(prefs))
+                except Exception:
+                    pass
 
         self.context = await self.pw.chromium.launch_persistent_context(
             str(PROFILE_DIR),
@@ -202,10 +251,11 @@ class VoiceDaemon:
         notify("ChatGPT Voice Ready", "Daemon started. Use hotkey to toggle recording.")
 
     async def _minimize_window(self):
-        """Hide browser off-screen instead of minimizing.
+        """Minimize the browser window via CDP.
 
-        True minimization causes Chromium to suspend the page, breaking
-        evaluate() and element queries. Moving off-screen keeps it alive.
+        The visibility API overrides in add_init_script prevent Chromium
+        from suspending the page, and find_element uses state='attached'
+        instead of 'visible', so minimization is safe.
         """
         try:
             cdp = await self.page.context.new_cdp_session(self.page)
@@ -214,19 +264,11 @@ class VoiceDaemon:
                 "Browser.setWindowBounds",
                 {
                     "windowId": window["windowId"],
-                    "bounds": {"windowState": "normal"},
-                },
-            )
-            await asyncio.sleep(0.1)
-            await cdp.send(
-                "Browser.setWindowBounds",
-                {
-                    "windowId": window["windowId"],
-                    "bounds": {"left": -10000, "top": -10000, "width": 800, "height": 600},
+                    "bounds": {"windowState": "minimized"},
                 },
             )
             await cdp.detach()
-            log.info("Window hidden off-screen")
+            log.info("Window minimized")
         except Exception as e:
             log.warning("Could not hide window: %s", e)
 
@@ -245,6 +287,29 @@ class VoiceDaemon:
             await cdp.detach()
         except Exception as e:
             log.warning("Could not show window: %s", e)
+
+    def _start_visualizer(self):
+        """Launch the waveform visualizer subprocess."""
+        if self._visualizer_proc and self._visualizer_proc.poll() is None:
+            return  # already running
+        try:
+            self._visualizer_proc = subprocess.Popen(
+                [sys.executable, "-m", "chatgpt_voice", "visualizer"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            log.warning("Could not start visualizer: %s", e)
+
+    def _stop_visualizer(self):
+        """Kill the waveform visualizer subprocess."""
+        if self._visualizer_proc and self._visualizer_proc.poll() is None:
+            try:
+                self._visualizer_proc.terminate()
+            except Exception:
+                pass
+            self._visualizer_proc = None
 
     def _simulate_paste(self):
         """Simulate Ctrl+Shift+V via uinput to paste into focused window."""
@@ -334,12 +399,14 @@ class VoiceDaemon:
 
         await mic.click()
         self.recording = True
+        self._start_visualizer()
         log.info("Recording started")
         notify("Recording...", "Speak now. Press hotkey again to stop.")
         return {"status": "recording"}
 
     async def stop_recording(self):
         log.info("Stopping recording...")
+        self._stop_visualizer()
 
         # Click stop button
         stop = await self.find_element(self.config["selectors"]["stop_button"])
@@ -449,6 +516,7 @@ class VoiceDaemon:
 
     async def shutdown(self):
         log.info("Shutting down...")
+        self._stop_visualizer()
         notify("ChatGPT Voice", "Daemon stopping.")
         if self.server:
             self.server.close()
@@ -503,6 +571,10 @@ def main():
         if is_daemon_running():
             print("Daemon already running.")
             sys.exit(0)
+        # Clean up stale Chrome singleton files to prevent
+        # "Opening in existing browser session" on restart
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            (PROFILE_DIR / name).unlink(missing_ok=True)
         daemon = VoiceDaemon(config, visible=False)
         asyncio.run(daemon.run())
 

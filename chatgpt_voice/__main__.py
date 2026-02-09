@@ -10,22 +10,45 @@ from . import ipc
 from .platform_utils import send_notification
 
 
+def _visualizer_pid_file():
+    from pathlib import Path
+    if sys.platform == "win32":
+        from .config import config_dir
+        return config_dir() / "visualizer.pid"
+    return Path("/tmp/chatgpt-voice-visualizer.pid")
+
+
 def _start_visualizer_background():
     """Launch the recording wave visualizer as a detached subprocess (no extra window)."""
     try:
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NO_WINDOW  # 0x08000000
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, "-m", "chatgpt_voice", "visualizer"],
             creationflags=creationflags,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=(sys.platform != "win32"),
         )
+        _visualizer_pid_file().write_text(str(proc.pid))
     except Exception:
         pass  # non-fatal; daemon still runs without visualizer
+
+
+def _stop_visualizer():
+    """Kill the visualizer subprocess if it's running."""
+    import os, signal
+    pf = _visualizer_pid_file()
+    if not pf.exists():
+        return
+    try:
+        pid = int(pf.read_text().strip())
+        os.kill(pid, signal.SIGTERM)
+    except (ValueError, ProcessLookupError, OSError):
+        pass
+    finally:
+        pf.unlink(missing_ok=True)
 
 
 def _setup_logging():
@@ -71,6 +94,7 @@ def main(argv: list[str] | None = None):
         asyncio.run(daemon.run())
 
     elif cmd == "stop":
+        _stop_visualizer()
         if ipc.is_daemon_running():
             resp = ipc.send_command("quit")
             print(resp or "Sent quit signal.")

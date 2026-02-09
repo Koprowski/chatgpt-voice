@@ -10,6 +10,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 
 log = logging.getLogger("chatgpt-voice")
@@ -123,15 +124,44 @@ def _paste_pynput_mac() -> None:
 # ---------------------------------------------------------------------------
 
 def send_notification(title: str, body: str = "", timeout: float = 3) -> None:
-    """Show a desktop notification. timeout: seconds until it disappears."""
+    """Show a desktop notification that auto-closes after timeout seconds.
+
+    On GNOME, notify-send timeout hints are ignored, so we use gdbus to
+    send via D-Bus and then close the notification ourselves.
+    """
     try:
         if PLATFORM.startswith("linux"):
             ms = int(timeout * 1000)
-            subprocess.Popen(
-                ["notify-send", "-a", "ChatGPT Voice", "-t", str(ms), title, body],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+
+            def _send():
+                try:
+                    result = subprocess.run(
+                        ["gdbus", "call", "--session",
+                         "--dest", "org.freedesktop.Notifications",
+                         "--object-path", "/org/freedesktop/Notifications",
+                         "--method", "org.freedesktop.Notifications.Notify",
+                         "ChatGPT Voice", "0", "", title, body,
+                         "[]", "{}", str(ms)],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    out = result.stdout.strip()
+                    if out.startswith("(uint32 "):
+                        nid = out.split()[1].rstrip(",)")
+                        time.sleep(timeout)
+                        subprocess.run(
+                            ["gdbus", "call", "--session",
+                             "--dest", "org.freedesktop.Notifications",
+                             "--object-path", "/org/freedesktop/Notifications",
+                             "--method", "org.freedesktop.Notifications.CloseNotification",
+                             nid],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                        )
+                except Exception:
+                    pass
+
+            threading.Thread(target=_send, daemon=True).start()
         elif PLATFORM == "windows":
             _notify_windows(title, body, timeout)
         elif PLATFORM == "darwin":
