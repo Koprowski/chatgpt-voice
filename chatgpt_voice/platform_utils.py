@@ -253,12 +253,80 @@ def register_global_hotkey(hotkey: str, callback) -> object | None:
 
 
 def _register_pynput_hotkey(hotkey: str, callback) -> object:
-    """Register via pynput GlobalHotKeys."""
+    """Register via pynput, suppressing the trigger key on Windows."""
     from pynput import keyboard
 
-    # Translate human-readable combo to pynput format
+    if PLATFORM == "windows":
+        return _register_pynput_hotkey_windows(hotkey, callback)
+
+    # Non-Windows: use GlobalHotKeys (no suppression needed)
     pynput_combo = _to_pynput_hotkey(hotkey)
     listener = keyboard.GlobalHotKeys({pynput_combo: callback})
+    listener.daemon = True
+    listener.start()
+    return listener
+
+
+def _register_pynput_hotkey_windows(hotkey: str, callback) -> object:
+    """Windows-specific hotkey with key suppression via win32_event_filter.
+
+    GlobalHotKeys doesn't suppress keypresses, so Shift+. types '>' into
+    the focused app. This uses a low-level hook that detects the combo by
+    virtual key code and suppresses the keypress entirely.
+    """
+    import ctypes
+    from pynput import keyboard
+
+    # Map trigger key name to Windows virtual key code
+    _VK_MAP = {".": 0xBE, ",": 0xBC, "/": 0xBF, ";": 0xBA, "'": 0xDE,
+               "[": 0xDB, "]": 0xDD, "\\": 0xDC, "`": 0xC0, "-": 0xBD,
+               "=": 0xBB}
+
+    parts = [p.strip().lower() for p in hotkey.split("+")]
+    need_ctrl = False
+    need_shift = False
+    need_alt = False
+    trigger_vk = None
+    for p in parts:
+        if p in ("ctrl", "control"):
+            need_ctrl = True
+        elif p == "shift":
+            need_shift = True
+        elif p == "alt":
+            need_alt = True
+        elif p in _VK_MAP:
+            trigger_vk = _VK_MAP[p]
+        elif len(p) == 1 and p.isalnum():
+            trigger_vk = ord(p.upper())
+
+    WM_KEYDOWN = 0x0100
+    WM_SYSKEYDOWN = 0x0104
+    VK_CONTROL = 0x11
+    VK_SHIFT = 0x10
+    VK_MENU = 0x12  # Alt
+
+    def win32_filter(msg, data):
+        """Detect hotkey by vkCode, fire callback, and suppress the key."""
+        if msg not in (WM_KEYDOWN, WM_SYSKEYDOWN) or data.vkCode != trigger_vk:
+            listener._suppress = False
+            return
+
+        ctrl_down = bool(ctypes.windll.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        shift_down = bool(ctypes.windll.user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+        alt_down = bool(ctypes.windll.user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+
+        if (ctrl_down == need_ctrl and shift_down == need_shift
+                and alt_down == need_alt):
+            listener._suppress = True
+            callback()
+        else:
+            listener._suppress = False
+
+    listener = keyboard.Listener(
+        on_press=lambda k: None,
+        on_release=lambda k: None,
+        win32_event_filter=win32_filter,
+    )
     listener.daemon = True
     listener.start()
     return listener
