@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 linux = ["evdev>=1.6"]
-windows = ["pyperclip>=1.8", "plyer>=2.1", "pynput>=1.7", "sounddevice>=0.4.6", "win10toast"]
+windows = ["pyperclip>=1.8", "plyer>=2.1", "pynput>=1.7", "sounddevice>=0.4.6", "numpy>=1.26", "win10toast"]
 macos = ["pynput>=1.7"]
 all = ["evdev>=1.6", "pyperclip>=1.8", "plyer>=2.1", "pynput>=1.7"]
 
