@@ -171,21 +171,7 @@ def send_notification(title: str, body: str = "", timeout: float = 3) -> None:
 
 
 def _notify_windows(title: str, body: str, timeout: float = 3) -> None:
-    """Windows: win10toast respects duration (for short toasts); plyer timeout is ignored."""
-    # For short duration (e.g. 1s startup toast), use win10toast so it actually disappears
-    if timeout <= 5:
-        try:
-            from win10toast import ToastNotifier
-            toaster = ToastNotifier()
-            toaster.show_toast(
-                title,
-                body or " ",
-                duration=max(1, int(timeout)),
-                threaded=True,
-            )
-            return
-        except Exception:
-            pass
+    """Windows toast notification via plyer or PowerShell fallback."""
     try:
         from plyer import notification
         notification.notify(
