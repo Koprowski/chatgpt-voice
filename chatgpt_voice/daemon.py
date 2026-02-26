@@ -467,9 +467,19 @@ class VoiceDaemon:
         # thread and must schedule the coroutine on this loop, not get_event_loop().
         loop = asyncio.get_running_loop()
         hotkey_combo = self.config.get("hotkey", "ctrl+shift+.")
+
+        def _make_hotkey_handler(coro_func):
+            def handler():
+                fut = asyncio.run_coroutine_threadsafe(coro_func(), loop)
+                def _log_exc(f):
+                    if not f.cancelled() and f.exception():
+                        log.error("Hotkey handler error: %s", f.exception(), exc_info=f.exception())
+                fut.add_done_callback(_log_exc)
+            return handler
+
         self._hotkey_listener = platform_utils.register_global_hotkey(
             hotkey_combo,
-            lambda: asyncio.run_coroutine_threadsafe(self.toggle(), loop),
+            _make_hotkey_handler(self.toggle),
         )
         if self._hotkey_listener:
             log.info("Global hotkey registered: %s", hotkey_combo)
