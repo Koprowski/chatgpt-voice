@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
     "hotkey": "ctrl+shift+.",
     "selectors": {
         "mic_button": [
+            'button[aria-label="Start dictation" i]',
             'button[aria-label="Dictate button" i]',
             'button[aria-label*="Dictate" i]:not([aria-label*="Stop" i]):not([aria-label*="Submit" i])',
         ],

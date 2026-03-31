@@ -44,6 +44,25 @@ class VoiceDaemon:
             if m:
                 keywords.append(m.group(1).lower())
 
+        # Try get_by_role first — matches accessible name (aria-label OR innerText)
+        for kw in keywords:
+            try:
+                locator = self.page.get_by_role("button", name=kw)
+                el = await locator.first.element_handle(timeout=500)
+                if el:
+                    return el
+            except Exception:
+                continue
+
+        # Try query_selector — works reliably in minimized windows
+        for selector in selector_list:
+            try:
+                el = await self.page.query_selector(selector)
+                if el:
+                    return el
+            except Exception:
+                continue
+
         if keywords:
             handle = await self.page.evaluate_handle("""(keywords) => {
                 for (const kw of keywords) {
@@ -59,11 +78,11 @@ class VoiceDaemon:
             if el:
                 return el
 
-        # Fallback: try CSS selectors with state='attached'
+        # Fallback: wait up to 3s for any selector to appear
         for selector in selector_list:
             try:
                 el = await self.page.wait_for_selector(
-                    selector, state="attached", timeout=500,
+                    selector, state="attached", timeout=3000,
                 )
                 if el:
                     return el
@@ -314,37 +333,67 @@ class VoiceDaemon:
             await self._clear_input()
             await asyncio.sleep(0.3)
 
-        mic = await self.find_element(self.config["selectors"]["mic_button"])
-        if not mic:
-            # Check if we need to log in
-            needs_login = await self.page.evaluate("""() => {
-                return !!document.querySelector('[data-testid="login-button"]')
-                    || !!document.querySelector('button[data-action="click:login"]')
-                    || document.body.innerText.includes('Log in')
-                       && !document.querySelector('button[aria-label*="Dictate" i]');
-            }""")
-            if needs_login:
-                log.warning("ChatGPT session expired, showing browser for re-login")
-                platform_utils.send_notification(
-                    "Session expired",
-                    "Opening browser to re-login to ChatGPT...",
-                )
-                await self._show_window()
-                return {"status": "login_required"}
-            # Debug: dump all buttons on the page
-            try:
-                btns = await self.page.evaluate("""() => {
-                    return Array.from(document.querySelectorAll('button'))
-                        .map(b => b.getAttribute('aria-label') || b.innerText.substring(0, 30) || '(no label)')
-                        .filter(l => l !== '(no label)');
+        # Poll via JS evaluate — the only method that reliably finds buttons
+        # in minimized Chromium windows. Poll for up to 5 seconds.
+        import re as _re
+        keywords = []
+        for sel in self.config["selectors"]["mic_button"]:
+            m = _re.search(r'aria-label[*~|^$]?=\s*"([^"]+)"', sel)
+            if m:
+                keywords.append(m.group(1).lower())
+        clicked = None
+        for _i in range(150):  # 150 × 100ms = 15s
+            clicked = await self.page.evaluate("""(keywords) => {
+                for (const kw of keywords) {
+                    for (const btn of document.querySelectorAll('button')) {
+                        const label = (btn.getAttribute('aria-label') || btn.innerText || '').toLowerCase();
+                        if (label.includes(kw)) { btn.click(); return kw; }
+                    }
+                }
+                return null;
+            }""", keywords)
+            if clicked:
+                log.info("Clicked mic button via JS after %d polls (keyword=%s)", _i + 1, clicked)
+                break
+            await asyncio.sleep(0.1)
+        if not clicked:
+            mic = await self.find_element(self.config["selectors"]["mic_button"])
+            if not mic:
+                # Check if we need to log in
+                needs_login = await self.page.evaluate("""() => {
+                    return !!document.querySelector('[data-testid="login-button"]')
+                        || !!document.querySelector('button[data-action="click:login"]')
+                        || document.body.innerText.includes('Log in')
+                           && !document.querySelector('button[aria-label*="Dictate" i]')
+                           && !document.querySelector('button[aria-label*="dictation" i]');
                 }""")
-                log.error("Mic button not found. Available buttons: %s", btns)
-            except Exception:
-                log.error("Mic button not found and could not dump page buttons")
-            platform_utils.send_notification("Error", "Could not find microphone button.")
-            return {"status": "error", "message": "mic button not found"}
-
-        await mic.click()
+                if needs_login:
+                    log.warning("ChatGPT session expired, showing browser for re-login")
+                    platform_utils.send_notification(
+                        "Session expired",
+                        "Opening browser to re-login to ChatGPT...",
+                    )
+                    await self._show_window()
+                    return {"status": "login_required"}
+                # Debug: dump all buttons on the page
+                try:
+                    btns = await self.page.evaluate("""() => {
+                        return Array.from(document.querySelectorAll('button'))
+                            .map(b => {
+                                const al = b.getAttribute('aria-label');
+                                const tx = b.innerText.substring(0, 30);
+                                return al ? `aria-label="${al}"` : (tx ? `text="${tx}"` : null);
+                            })
+                            .filter(Boolean);
+                    }""")
+                    log.error("Mic button not found. Available buttons: %s", btns)
+                except Exception:
+                    log.error("Mic button not found and could not dump page buttons")
+                platform_utils.send_notification("Error", "Could not find microphone button.")
+                return {"status": "error", "message": "mic button not found"}
+            await mic.click()
+        else:
+            log.info("Clicked mic button via JS (keyword=%s)", clicked)
         self.recording = True
         log.info("Recording started")
         platform_utils.send_notification(
