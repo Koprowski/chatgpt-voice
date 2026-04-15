@@ -100,6 +100,45 @@ def log_file() -> Path:
     return config_dir() / "daemon.log"
 
 
+def _merge_selector_lists(defaults: list[str], user_value) -> list[str]:
+    """Merge user selector list with defaults while preserving order.
+
+    User selectors are prioritized, but defaults are appended so updates to
+    ChatGPT labels continue to work for existing installs with old config.json.
+    """
+    if not isinstance(user_value, list):
+        return list(defaults)
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in user_value + defaults:
+        if not isinstance(value, str):
+            continue
+        selector = value.strip()
+        if not selector or selector in seen:
+            continue
+        merged.append(selector)
+        seen.add(selector)
+    return merged
+
+
+def _merge_selectors(defaults: dict, user_value) -> dict:
+    """Deep-merge selector groups so defaults remain as fallbacks."""
+    if not isinstance(user_value, dict):
+        return dict(defaults)
+
+    merged = {}
+    for key, default_list in defaults.items():
+        merged[key] = _merge_selector_lists(default_list, user_value.get(key))
+
+    # Keep any user-defined custom selector groups intact.
+    for key, value in user_value.items():
+        if key not in merged:
+            merged[key] = value
+
+    return merged
+
+
 def load_config() -> dict:
     """Load and merge user config with defaults."""
     cdir = config_dir()
@@ -110,10 +149,10 @@ def load_config() -> dict:
         with open(cf) as f:
             user = json.load(f)
         merged = {**DEFAULT_CONFIG, **user}
-        merged["selectors"] = {
-            **DEFAULT_CONFIG["selectors"],
-            **user.get("selectors", {}),
-        }
+        merged["selectors"] = _merge_selectors(
+            DEFAULT_CONFIG["selectors"],
+            user.get("selectors", {}),
+        )
         return merged
     else:
         with open(cf, "w") as f:
