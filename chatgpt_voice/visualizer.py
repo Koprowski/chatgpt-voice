@@ -28,9 +28,30 @@ _WIN_H = 80               # window height
 _POLL_MS_RECORDING = 50   # fast updates for smooth scrolling
 _POLL_MS_IDLE = 600
 _VISUALIZER_LOCK = "visualizer.lock"
+_POSITION_FILE = "visualizer_position.json"
 
 # Compute window width from bar count
 _WIN_W = _NUM_BARS * (_BAR_W + _BAR_GAP) + _BAR_GAP
+
+
+def _load_position() -> tuple[int, int] | None:
+    try:
+        path = config_dir() / _POSITION_FILE
+        if path.exists():
+            data = json.loads(path.read_text())
+            return int(data["x"]), int(data["y"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _save_position(x: int, y: int) -> None:
+    try:
+        config_dir().mkdir(parents=True, exist_ok=True)
+        path = config_dir() / _POSITION_FILE
+        path.write_text(json.dumps({"x": x, "y": y}))
+    except OSError:
+        pass
 
 
 def _get_status() -> str | None:
@@ -116,8 +137,18 @@ def run_visualizer():
                 root.configure(bg=_BG_COLOR)
                 root.resizable(False, False)
                 try:
-                    sw = root.winfo_screenwidth()
-                    root.geometry(f"{_WIN_W}x{_WIN_H}+{(sw - _WIN_W) // 2}+16")
+                    saved = _load_position()
+                    if saved is not None:
+                        sx, sy = saved
+                        # Clamp to visible screen area
+                        sw = root.winfo_screenwidth()
+                        sh = root.winfo_screenheight()
+                        sx = max(0, min(sx, sw - _WIN_W))
+                        sy = max(0, min(sy, sh - _WIN_H))
+                        root.geometry(f"{_WIN_W}x{_WIN_H}+{sx}+{sy}")
+                    else:
+                        sw = root.winfo_screenwidth()
+                        root.geometry(f"{_WIN_W}x{_WIN_H}+{(sw - _WIN_W) // 2}+16")
                 except Exception:
                     root.geometry(f"{_WIN_W}x{_WIN_H}")
 
@@ -145,8 +176,40 @@ def run_visualizer():
                     except Exception:
                         pass
 
+                # --- Click-and-drag to move the window ---
+                drag = {"x": 0, "y": 0}
+
+                def on_press(event):
+                    # Offset of click within window
+                    drag["x"] = event.x_root - root.winfo_x()
+                    drag["y"] = event.y_root - root.winfo_y()
+                    try:
+                        root.configure(cursor="fleur")
+                    except tk.TclError:
+                        pass
+
+                def on_drag(event):
+                    try:
+                        new_x = event.x_root - drag["x"]
+                        new_y = event.y_root - drag["y"]
+                        root.geometry(f"+{new_x}+{new_y}")
+                    except tk.TclError:
+                        pass
+
+                def on_release(_event):
+                    try:
+                        root.configure(cursor="")
+                        _save_position(root.winfo_x(), root.winfo_y())
+                    except tk.TclError:
+                        pass
+
                 root.bind("<Escape>", close_win)
                 root.bind("<Button-3>", close_win)
+                # Bind drag on both root and canvas so clicks anywhere work
+                for widget in (root, cv):
+                    widget.bind("<ButtonPress-1>", on_press)
+                    widget.bind("<B1-Motion>", on_drag)
+                    widget.bind("<ButtonRelease-1>", on_release)
 
                 # Reset waveform buffer
                 waveform.clear()

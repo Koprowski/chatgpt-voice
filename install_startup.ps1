@@ -51,8 +51,36 @@ $Shortcut2.Arguments = "-m chatgpt_voice visualizer"
 $Shortcut2.WorkingDirectory = $DIR
 $Shortcut2.Description = "ChatGPT Voice recording indicator (wave when recording)"
 $Shortcut2.Save()
-[System.Runtime.Interopservices.Marshal]::ReleaseComObject($WScript) | Out-Null
 Write-Host "Created: ChatGPT Voice Visualizer.lnk" -ForegroundColor Green
+
+# 3. Start Menu shortcuts (for manual launch without rebooting)
+$STARTMENU = Join-Path ([Environment]::GetFolderPath("Programs")) "ChatGPT Voice"
+New-Item -ItemType Directory -Path $STARTMENU -Force | Out-Null
+
+$smDaemon = $WScript.CreateShortcut((Join-Path $STARTMENU "ChatGPT Voice (Daemon).lnk"))
+$smDaemon.TargetPath = "powershell.exe"
+$smDaemon.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$LAUNCHER`""
+$smDaemon.WorkingDirectory = $DIR
+$smDaemon.Description = "Launch ChatGPT Voice daemon (hidden, logs to $LOG)"
+$smDaemon.Save()
+
+$smVis = $WScript.CreateShortcut((Join-Path $STARTMENU "ChatGPT Voice Visualizer.lnk"))
+$smVis.TargetPath = $PYTHONW
+$smVis.Arguments = "-m chatgpt_voice visualizer"
+$smVis.WorkingDirectory = $DIR
+$smVis.Description = "Launch ChatGPT Voice visualizer overlay"
+$smVis.Save()
+
+$smRestart = $WScript.CreateShortcut((Join-Path $STARTMENU "ChatGPT Voice (Restart).lnk"))
+$smRestart.TargetPath = "powershell.exe"
+$smRestart.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $DIR 'restart.ps1')`""
+$smRestart.WorkingDirectory = $DIR
+$smRestart.Description = "Kill and relaunch ChatGPT Voice daemon + visualizer"
+$smRestart.Save()
+
+Write-Host "Created Start Menu shortcuts under 'ChatGPT Voice'" -ForegroundColor Green
+
+[System.Runtime.Interopservices.Marshal]::ReleaseComObject($WScript) | Out-Null
 
 Write-Host ""
 Write-Host "On login: daemon runs hidden; visualizer shows a wave window when recording." -ForegroundColor Cyan
