@@ -19,12 +19,12 @@ except ImportError:
 
 _SAMPLE_RATE = 16000
 _BLOCKSIZE = 512          # smaller blocks = more waveform resolution
-_NUM_BARS = 80            # number of vertical lines in the waveform
+_NUM_BARS = 40            # number of vertical lines in the waveform
 _BAR_W = 3                # width of each vertical line (px)
 _BAR_GAP = 1              # gap between lines (px)
 _BAR_COLOR = "#d1d1d1"    # light gray (ChatGPT style)
 _BG_COLOR = "#1a1a1a"     # dark background
-_WIN_H = 80               # window height
+_WIN_H = 40               # window height
 _POLL_MS_RECORDING = 50   # fast updates for smooth scrolling
 _POLL_MS_IDLE = 600
 _VISUALIZER_LOCK = "visualizer.lock"
