@@ -505,16 +505,36 @@ class VoiceDaemon:
 
         log.info("Daemon running (PID %d)", __import__("os").getpid())
 
-        # Handle shutdown signals (Unix only)
-        if sys.platform != "win32":
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+
+        # Handle shutdown signals so Ctrl+C runs the cleanup path (close
+        # Chromium, drop PID file, stop hotkey listener) instead of dumping
+        # a KeyboardInterrupt traceback.
+        tick_task = None
+        if sys.platform == "win32":
+            # On Windows asyncio's ProactorEventLoop ignores add_signal_handler.
+            # Use signal.signal() + a periodic wakeup so the handler runs while
+            # we're suspended on _shutdown_event.wait().
+            def _win_sig(_sig, _frame):
+                loop.call_soon_threadsafe(self._shutdown_event.set)
+            for _s in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+                if _s is not None:
+                    try:
+                        signal.signal(_s, _win_sig)
+                    except (ValueError, OSError):
+                        pass
+
+            async def _tick():
+                while not self._shutdown_event.is_set():
+                    await asyncio.sleep(0.25)
+            tick_task = asyncio.create_task(_tick())
+        else:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, self._shutdown_event.set)
 
         # Register global hotkey (non-Wayland platforms).
         # Capture the running loop here (main thread); the callback runs in pynput's
         # thread and must schedule the coroutine on this loop, not get_event_loop().
-        loop = asyncio.get_running_loop()
         hotkey_combo = self.config.get("hotkey", "ctrl+shift+.")
 
         def _make_hotkey_handler(coro_func):
@@ -533,9 +553,15 @@ class VoiceDaemon:
         if self._hotkey_listener:
             log.info("Global hotkey registered: %s", hotkey_combo)
 
-        # Wait for shutdown signal
-        await self._shutdown_event.wait()
-        await self.shutdown()
+        # Wait for shutdown signal. try/finally guarantees cleanup even if
+        # the wait is cancelled (e.g. KeyboardInterrupt propagating through
+        # asyncio.run on platforms where the signal handler couldn't fire).
+        try:
+            await self._shutdown_event.wait()
+        finally:
+            if tick_task is not None:
+                tick_task.cancel()
+            await self.shutdown()
 
     async def shutdown(self):
         log.info("Shutting down...")

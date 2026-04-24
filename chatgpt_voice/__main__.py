@@ -82,7 +82,10 @@ def main(argv: list[str] | None = None):
         _start_visualizer_background()
         from .daemon import VoiceDaemon
         daemon = VoiceDaemon(config, visible=False)
-        asyncio.run(daemon.run())
+        try:
+            asyncio.run(daemon.run())
+        except KeyboardInterrupt:
+            pass
 
     elif cmd == "login":
         if ipc.is_daemon_running():
@@ -91,7 +94,10 @@ def main(argv: list[str] | None = None):
         print("Opening browser for login. Log in to ChatGPT, then close the browser.")
         from .daemon import VoiceDaemon
         daemon = VoiceDaemon(config, visible=True)
-        asyncio.run(daemon.run())
+        try:
+            asyncio.run(daemon.run())
+        except KeyboardInterrupt:
+            pass
 
     elif cmd == "stop":
         _stop_visualizer()
