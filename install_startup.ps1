@@ -37,7 +37,7 @@ Set-Location $DIR
 & $PYTHON -m chatgpt_voice start *>> $LOG
 "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Daemon exited (code $LASTEXITCODE)" | Add-Content $LOG
 '@
-[System.IO.File]::WriteAllText($LAUNCHER, $launcherContent + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($LAUNCHER, $launcherContent + "`n", [System.Text.UTF8Encoding]::new($false))
 Write-Host "Created: start_daemon.ps1" -ForegroundColor Green
 
 # 1. Daemon: hidden PowerShell window, all output goes to log file.
