@@ -17,14 +17,27 @@ $STARTUP = [Environment]::GetFolderPath("Startup")
 $LOG = Join-Path $env:APPDATA "chatgpt-voice\daemon.log"
 $LAUNCHER = Join-Path $DIR "start_daemon.ps1"
 
-# Write a launcher script that runs the daemon hidden and logs all output.
-@"
-`$LOG = "$LOG"
-`$null = New-Item -Force -ItemType Directory (Split-Path `$LOG)
-"[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Starting chatgpt-voice daemon" | Add-Content `$LOG
-& "$PYTHON" -m chatgpt_voice start *>> `$LOG
-"[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Daemon exited (code `$LASTEXITCODE)" | Add-Content `$LOG
-"@ | Set-Content $LAUNCHER -Encoding UTF8
+# Write a portable launcher script that runs the daemon hidden and logs all output.
+$launcherContent = @'
+$ErrorActionPreference = "Stop"
+
+$DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$PYTHON = Join-Path $DIR "venv\Scripts\python.exe"
+$LOG = Join-Path $env:APPDATA "chatgpt-voice\daemon.log"
+
+$null = New-Item -Force -ItemType Directory (Split-Path $LOG)
+
+if (-not (Test-Path $PYTHON)) {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Virtualenv python not found at $PYTHON" | Add-Content $LOG
+    exit 1
+}
+
+Set-Location $DIR
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Starting chatgpt-voice daemon" | Add-Content $LOG
+& $PYTHON -m chatgpt_voice start *>> $LOG
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Daemon exited (code $LASTEXITCODE)" | Add-Content $LOG
+'@
+[System.IO.File]::WriteAllText($LAUNCHER, $launcherContent, [System.Text.UTF8Encoding]::new($false))
 Write-Host "Created: start_daemon.ps1" -ForegroundColor Green
 
 # 1. Daemon: hidden PowerShell window, all output goes to log file.

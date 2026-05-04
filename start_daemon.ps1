@@ -1,7 +1,17 @@
-$LOG = "C:\Users\kopro\AppData\Roaming\chatgpt-voice\daemon.log"
+$ErrorActionPreference = "Stop"
+
+$DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$PYTHON = Join-Path $DIR "venv\Scripts\python.exe"
+$LOG = Join-Path $env:APPDATA "chatgpt-voice\daemon.log"
+
 $null = New-Item -Force -ItemType Directory (Split-Path $LOG)
-Start-Process `
-    -FilePath "C:\Tools\chatgpt-voice-venv\Scripts\python.exe" `
-    -ArgumentList "-m", "chatgpt_voice", "start" `
-    -WindowStyle Hidden `
-    -RedirectStandardError $LOG
+
+if (-not (Test-Path $PYTHON)) {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Virtualenv python not found at $PYTHON" | Add-Content $LOG
+    exit 1
+}
+
+Set-Location $DIR
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Starting chatgpt-voice daemon" | Add-Content $LOG
+& $PYTHON -m chatgpt_voice start *>> $LOG
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Daemon exited (code $LASTEXITCODE)" | Add-Content $LOG
