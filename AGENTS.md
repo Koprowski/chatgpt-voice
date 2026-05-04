@@ -13,10 +13,45 @@ Canonical Mission Control repo:
 - GitHub: `Koprowski/mission-control`
 - Local Windows path: `E:\Apps\mission-control`
 
-Mission Control/WBS is the master portfolio map across projects. It is not only
-committed execution. It is also the visibility layer for candidate leverage:
+## Canonical Checkout and Sandbox Rule
+
+When a task references another known repo or operating surface, use its
+canonical local checkout first.
+
+For Mission Control, the canonical local checkout is:
+
+`E:\Apps\mission-control`
+
+If Codex or another agent is sandboxed and cannot access the canonical checkout,
+request filesystem escalation or user approval for that canonical path before
+using a fallback. Do not clone the repo into `C:\tmp`, the current repo, or
+another temporary path merely because sandboxing blocked access.
+
+Only use a fallback clone/workspace when:
+
+- the canonical checkout is missing;
+- the canonical checkout is broken;
+- the canonical checkout cannot be accessed after escalation/user approval;
+- or the user explicitly asks to use a temporary clone.
+
+If a fallback is used, say so clearly, explain why, and reconcile the canonical
+checkout as soon as possible.
+
+For cross-repo work:
+
+1. Identify the canonical repo and local path.
+2. Check the canonical checkout first.
+3. If blocked by sandboxing, request escalation for the canonical path.
+4. Preserve unrelated local changes.
+5. Make the requested update in the canonical checkout whenever possible.
+6. Commit and push from the canonical checkout when the repo's workflow calls
+   for it.
+7. Avoid creating duplicate repos, duplicate planning files, or parallel sources
+   of truth.
+
+Mission Control/WBS is the master portfolio map across projects. It includes
 active work, shaped backlog, discovery items, and high-leverage opportunities
-that should compete for attention across projects.
+that should compete for attention.
 
 GitHub Issues are the canonical source of truth for repo-specific implementation
 detail: PRDs, epics, bugs, reviews, acceptance criteria, and engineering
@@ -67,7 +102,7 @@ Agent behavior:
 - When updating Mission Control from another repo, preserve unrelated local work
   in both repos.
 - If filesystem permissions block direct edits to `E:\Apps\mission-control`,
-  ask for permission rather than writing Mission Control content into the
-  current repo.
+  request escalation/user approval for the canonical checkout rather than
+  writing Mission Control content into the current repo or a fallback clone.
 - After meaningful Mission Control changes, commit and push the Mission Control
   repo unless the user asks not to.
