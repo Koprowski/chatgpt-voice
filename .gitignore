@@ -15,3 +15,7 @@ config.json
 daemon.log
 daemon.pid
 visualizer.lock
+
+# Local agent state and Windows shell artifacts
+.claude/
+nul
