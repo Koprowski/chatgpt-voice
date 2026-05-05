@@ -131,9 +131,43 @@ class VoiceDaemon:
         """)
 
         log.info("Navigating to %s", self.config["chatgpt_url"])
-        await self.page.goto(
-            self.config["chatgpt_url"], wait_until="domcontentloaded",
+        # Retry transient network errors at login: DNS / NIC / VPN may not be
+        # ready yet when the daemon starts. Backoff caps at ~60s total.
+        transient_markers = (
+            "ERR_NAME_NOT_RESOLVED",
+            "ERR_INTERNET_DISCONNECTED",
+            "ERR_NETWORK_CHANGED",
+            "ERR_CONNECTION_RESET",
+            "ERR_CONNECTION_REFUSED",
+            "ERR_CONNECTION_TIMED_OUT",
+            "ERR_PROXY_CONNECTION_FAILED",
+            "ERR_NETWORK_IO_SUSPENDED",
+            "ERR_ADDRESS_UNREACHABLE",
+            "ERR_TIMED_OUT",
         )
+        delay = 1.0
+        last_error = None
+        for attempt in range(8):
+            try:
+                await self.page.goto(
+                    self.config["chatgpt_url"], wait_until="domcontentloaded",
+                )
+                last_error = None
+                break
+            except Exception as e:
+                msg = str(e)
+                if not any(m in msg for m in transient_markers):
+                    raise
+                last_error = e
+                log.warning(
+                    "Transient navigation error (attempt %d): %s; retrying in %.1fs",
+                    attempt + 1, msg.splitlines()[0], delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 16.0)
+        if last_error is not None:
+            log.error("Giving up after retries: %s", last_error)
+            raise last_error
 
         # Wait for the composer to load (ChatGPT is slow to render)
         log.info("Waiting for page to fully render...")

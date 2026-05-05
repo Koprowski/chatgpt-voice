@@ -52,11 +52,34 @@ def _stop_visualizer():
 
 
 def _setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler()],
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+    import os
+
+    if sys.platform == "win32":
+        log_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "chatgpt-voice"
+    elif sys.platform == "darwin":
+        log_dir = Path.home() / "Library" / "Logs" / "chatgpt-voice"
+    else:
+        log_dir = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "chatgpt-voice"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "daemon.log"
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
     )
+    file_handler.setFormatter(fmt)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Clear any handlers from a prior basicConfig call
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.addHandler(file_handler)
+    root.addHandler(stream_handler)
 
 
 def main(argv: list[str] | None = None):
