@@ -203,7 +203,10 @@ systemctl --user start chatgpt-voice.service
     ]
   },
   "post_stop_poll_interval_ms": 200,
-  "post_stop_poll_timeout_ms": 10000
+  "post_stop_poll_timeout_ms": 60000,
+  "post_stop_idle_no_text_timeout_ms": 15000,
+  "late_transcript_poll_interval_ms": 1000,
+  "late_transcript_poll_timeout_ms": 300000
 }
 ```
 
@@ -228,6 +231,12 @@ The `hotkey` field is used by pynput on non-Wayland platforms. On Linux Wayland,
 **Paste not working (Windows/macOS):**
 - Ensure no other app is intercepting the hotkey
 - Try running with admin/elevated privileges once
+
+**Long recording finishes but nothing pastes:**
+- Check the daemon log for `No transcription text captured after ...`; on Windows the log is `%APPDATA%/chatgpt-voice/daemon.log`
+- If ChatGPT finishes late, the daemon opens the recovered text in your default text editor, saves a `.txt` copy under `%LOCALAPPDATA%/chatgpt-voice/recovered-transcripts/`, and appends it to `%LOCALAPPDATA%/chatgpt-voice/recovered-transcripts.jsonl`
+- While ChatGPT is processing or recovering a late transcript, extra hotkey presses are ignored so the visualizer and ChatGPT do not drift into opposite states
+- If ChatGPT visibly keeps processing/transcribing, the daemon keeps showing processing. If ChatGPT returns to idle with no text and no processing indicator for `post_stop_idle_no_text_timeout_ms`, the daemon treats the attempt as inactive instead of showing processing until the full timeout
 
 **ChatGPT session expired:**
 - Stop daemon, run `python -m chatgpt_voice login`, re-authenticate, Ctrl+C, restart daemon

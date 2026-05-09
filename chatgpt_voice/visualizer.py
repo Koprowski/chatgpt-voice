@@ -24,6 +24,7 @@ _BAR_W = 3                # width of each vertical line (px)
 _BAR_GAP = 1              # gap between lines (px)
 _BAR_COLOR = "#d1d1d1"    # light gray (ChatGPT style)
 _BG_COLOR = "#1a1a1a"     # dark background
+_TEXT_COLOR = "#d1d1d1"
 _WIN_H = 40               # window height
 _POLL_MS_RECORDING = 50   # fast updates for smooth scrolling
 _POLL_MS_IDLE = 600
@@ -108,6 +109,7 @@ def run_visualizer():
     root = None
     cv = None
     line_ids: list = []
+    text_id = None
     # Rolling buffer of amplitude values — fills from right, scrolls left
     waveform = collections.deque([0.0] * _NUM_BARS, maxlen=_NUM_BARS)
 
@@ -214,6 +216,12 @@ def run_visualizer():
                 # Reset waveform buffer
                 waveform.clear()
                 waveform.extend([0.0] * _NUM_BARS)
+            elif cv is not None and text_id is not None:
+                try:
+                    cv.delete(text_id)
+                except tk.TclError:
+                    pass
+                text_id = None
 
             # --- Update loop while recording ---
             center_y = _WIN_H // 2
@@ -260,6 +268,7 @@ def run_visualizer():
                 root = None
             cv = None
             line_ids = []
+            text_id = None
             waveform.clear()
             waveform.extend([0.0] * _NUM_BARS)
             if stream is not None:
@@ -269,15 +278,110 @@ def run_visualizer():
                 except Exception:
                     pass
                 stream = None
+        elif status in ("processing", "recovering"):
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+                stream = None
+
+            if root is None:
+                root = tk.Tk()
+                root.overrideredirect(True)
+                root.attributes("-topmost", True)
+                root.configure(bg=_BG_COLOR)
+                root.resizable(False, False)
+                try:
+                    saved = _load_position()
+                    if saved is not None:
+                        sx, sy = saved
+                        sw = root.winfo_screenwidth()
+                        sh = root.winfo_screenheight()
+                        sx = max(0, min(sx, sw - _WIN_W))
+                        sy = max(0, min(sy, sh - _WIN_H))
+                        root.geometry(f"{_WIN_W}x{_WIN_H}+{sx}+{sy}")
+                    else:
+                        sw = root.winfo_screenwidth()
+                        root.geometry(f"{_WIN_W}x{_WIN_H}+{(sw - _WIN_W) // 2}+16")
+                except Exception:
+                    root.geometry(f"{_WIN_W}x{_WIN_H}")
+
+                cv = tk.Canvas(root, width=_WIN_W, height=_WIN_H,
+                               bg=_BG_COLOR, highlightthickness=0, bd=0)
+                cv.pack()
+
+                def close_win(_event=None):
+                    try:
+                        root.destroy()
+                    except Exception:
+                        pass
+
+                drag = {"x": 0, "y": 0}
+
+                def on_press(event):
+                    drag["x"] = event.x_root - root.winfo_x()
+                    drag["y"] = event.y_root - root.winfo_y()
+                    try:
+                        root.configure(cursor="fleur")
+                    except tk.TclError:
+                        pass
+
+                def on_drag(event):
+                    try:
+                        root.geometry(f"+{event.x_root - drag['x']}+{event.y_root - drag['y']}")
+                    except tk.TclError:
+                        pass
+
+                def on_release(_event):
+                    try:
+                        root.configure(cursor="")
+                        _save_position(root.winfo_x(), root.winfo_y())
+                    except tk.TclError:
+                        pass
+
+                root.bind("<Escape>", close_win)
+                root.bind("<Button-3>", close_win)
+                for widget in (root, cv):
+                    widget.bind("<ButtonPress-1>", on_press)
+                    widget.bind("<B1-Motion>", on_drag)
+                    widget.bind("<ButtonRelease-1>", on_release)
+
+            if cv is not None:
+                label = "Processing dictation..." if status == "processing" else "Recovering late transcript..."
+                if text_id is None:
+                    text_id = cv.create_text(
+                        _WIN_W // 2,
+                        _WIN_H // 2,
+                        fill=_TEXT_COLOR,
+                        text=label,
+                        font=("Segoe UI", 9),
+                    )
+                else:
+                    try:
+                        cv.itemconfigure(text_id, text=label)
+                    except tk.TclError:
+                        text_id = None
+
+            try:
+                if root is not None:
+                    root.update()
+            except tk.TclError:
+                root = None
+                cv = None
+                text_id = None
+            time.sleep(_POLL_MS_IDLE / 1000.0)
         else:
             if root is not None:
                 try:
                     root.destroy()
                 except (tk.TclError, Exception):
                     pass
-                root = None
+            root = None
             cv = None
             line_ids = []
+            text_id = None
             if stream is not None:
                 try:
                     stream.stop()

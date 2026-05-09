@@ -29,7 +29,10 @@ DEFAULT_CONFIG = {
         ],
     },
     "post_stop_poll_interval_ms": 200,
-    "post_stop_poll_timeout_ms": 10000,
+    "post_stop_poll_timeout_ms": 60000,
+    "post_stop_idle_no_text_timeout_ms": 15000,
+    "late_transcript_poll_interval_ms": 1000,
+    "late_transcript_poll_timeout_ms": 300000,
 }
 
 _APP_NAME = "chatgpt-voice"

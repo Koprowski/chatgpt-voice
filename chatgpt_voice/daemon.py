@@ -1,13 +1,16 @@
 """Core VoiceDaemon — platform-agnostic Playwright/ChatGPT logic."""
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
+import os
 import signal
+import subprocess
 import sys
 
 from . import ipc, platform_utils
-from .config import load_config, profile_dir
+from .config import data_dir, load_config, profile_dir
 
 log = logging.getLogger("chatgpt-voice")
 
@@ -17,6 +20,8 @@ class VoiceDaemon:
         self.config = config
         self.visible = visible
         self.recording = False
+        self.processing = False
+        self.recovering = False
         self.page = None
         self.pw = None
         self.context = None
@@ -24,6 +29,10 @@ class VoiceDaemon:
         self._pre_record_text = ""
         self._shutdown_event: asyncio.Event | None = None
         self._hotkey_listener = None
+        self._toggle_lock = asyncio.Lock()
+        self._late_recovery_task: asyncio.Task | None = None
+        self._session_counter = 0
+        self._last_page_state: str = "unknown"
 
     # ------------------------------------------------------------------
     # Browser helpers
@@ -312,6 +321,116 @@ class VoiceDaemon:
             log.error("Failed to recover page: %s", e)
             raise
 
+    async def _get_page_voice_state(self) -> dict:
+        """Return the ChatGPT page's observed dictation state.
+
+        The daemon's internal state is useful for sequencing, but the page is
+        the authority for whether dictation actually started.
+        """
+        try:
+            state = await self.page.evaluate("""
+                () => {
+                    const labels = Array.from(document.querySelectorAll('button'))
+                        .map(b => (b.getAttribute('aria-label') || b.innerText || '').trim())
+                        .filter(Boolean);
+                    const lower = labels.map(label => label.toLowerCase());
+                    const bodyText = (document.body.innerText || '').toLowerCase();
+                    const busyNodes = Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-state="loading"]'));
+                    const hasStop = lower.some(label =>
+                        label.includes('stop dictation')
+                        || label.includes('submit dictation')
+                        || label.includes('stop recording')
+                    );
+                    const hasStart = lower.some(label =>
+                        (label.includes('start dictation')
+                            || label === 'dictate button'
+                            || label.includes('dictate'))
+                        && !label.includes('stop')
+                        && !label.includes('submit')
+                    );
+                    const hasProcessing = busyNodes.length > 0
+                        || lower.some(label =>
+                            label.includes('transcribing')
+                            || label.includes('processing')
+                            || label.includes('please wait')
+                            || label.includes('cancel dictation')
+                        )
+                        || bodyText.includes('transcribing')
+                        || bodyText.includes('processing dictation')
+                        || bodyText.includes('processing audio')
+                        || bodyText.includes('converting speech')
+                        || bodyText.includes('finishing dictation');
+                    const hasComposer = !!document.querySelector('#prompt-textarea')
+                        || !!document.querySelector('div[contenteditable="true"]')
+                        || !!document.querySelector('textarea');
+                    let text = '';
+                    const el = document.querySelector('#prompt-textarea')
+                        || document.querySelector('div[contenteditable="true"]')
+                        || document.querySelector('textarea');
+                    if (el) text = (el.innerText || el.value || '').trim();
+                    let observed = 'unknown';
+                    if (hasStop) observed = 'recording';
+                    else if (hasProcessing) observed = 'processing';
+                    else if (hasStart || hasComposer) observed = 'idle';
+                    return {
+                        observed,
+                        hasStart,
+                        hasStop,
+                        hasProcessing,
+                        hasComposer,
+                        textLength: text.length,
+                        labels,
+                    };
+                }
+            """)
+            self._last_page_state = state.get("observed", "unknown")
+            return state
+        except Exception as e:
+            log.warning("Could not observe page dictation state: %s", e)
+            self._last_page_state = "unavailable"
+            return {
+                "observed": "unavailable",
+                "hasStart": False,
+                "hasStop": False,
+                "hasProcessing": False,
+                "hasComposer": False,
+                "textLength": 0,
+                "labels": [],
+                "error": str(e),
+            }
+
+    async def _wait_for_page_voice_state(self, expected: str, timeout: float = 4.0) -> dict:
+        deadline = asyncio.get_running_loop().time() + timeout
+        state = await self._get_page_voice_state()
+        while state.get("observed") != expected and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.2)
+            state = await self._get_page_voice_state()
+        return state
+
+    async def _status_state(self) -> str:
+        if self.recording:
+            observed = await self._get_page_voice_state()
+            if observed.get("observed") != "recording":
+                log.warning(
+                    "Internal recording state disagrees with page state (%s); resetting to idle",
+                    observed.get("observed"),
+                )
+                self.recording = False
+                return "idle"
+            return "recording"
+        if self.processing:
+            observed = await self._get_page_voice_state()
+            if observed.get("observed") == "unavailable":
+                log.warning("Processing page is unavailable; resetting to idle")
+                self.processing = False
+                return "idle"
+            if observed.get("observed") == "processing":
+                return "processing"
+            return "processing"
+        if self.recovering:
+            return "recovering"
+        return "idle"
+
     # ------------------------------------------------------------------
     # Input field helpers
     # ------------------------------------------------------------------
@@ -349,19 +468,144 @@ class VoiceDaemon:
             }
         """)
 
+    def _recovery_file(self):
+        path = data_dir() / "recovered-transcripts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _save_recovered_transcript(self, text: str, source: str):
+        """Append a recovered transcript to a local holding file."""
+        now = datetime.now(timezone.utc)
+        record = {
+            "created_at": now.isoformat(),
+            "source": source,
+            "length": len(text),
+            "text": text,
+        }
+        with open(self._recovery_file(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        transcript_dir = data_dir() / "recovered-transcripts"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        safe_source = "".join(c if c.isalnum() or c in "-_" else "-" for c in source)
+        transcript_file = transcript_dir / f"{now.strftime('%Y%m%dT%H%M%SZ')}-{safe_source}.txt"
+        transcript_file.write_text(text, encoding="utf-8")
+        return transcript_file
+
+    def _open_recovered_transcript(self, path) -> None:
+        """Open recovered text in the user's default editor/viewer."""
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as e:
+            log.warning("Could not open recovered transcript file %s: %s", path, e)
+
+    async def _capture_late_transcript_if_present(
+        self,
+        pre_record_text: str,
+        source: str,
+        clear: bool = True,
+    ) -> str:
+        """Capture text that arrived after the normal stop path timed out."""
+        text = await self._get_input_text()
+        if not text or text == pre_record_text:
+            return ""
+
+        transcript_file = self._save_recovered_transcript(text, source)
+        log.warning(
+            "Recovered late transcription to holding files (len=%d, source=%s, file=%s)",
+            len(text),
+            source,
+            transcript_file,
+        )
+        platform_utils.send_notification(
+            "Late transcript recovered",
+            "Opening recovered transcript in your text editor.",
+            timeout=5,
+        )
+        self._open_recovered_transcript(transcript_file)
+        if clear:
+            await self._clear_input()
+        return text
+
+    async def _poll_for_late_transcript(self, pre_record_text: str, session_id: int):
+        interval = self.config.get("late_transcript_poll_interval_ms", 1000) / 1000
+        timeout = self.config.get("late_transcript_poll_timeout_ms", 300000) / 1000
+        elapsed = 0.0
+        self.recovering = True
+
+        log.info(
+            "Polling for late transcription after timeout (session=%d, timeout=%.1fs)",
+            session_id,
+            timeout,
+        )
+        try:
+            while elapsed < timeout:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                await self._ensure_page()
+                recovered = await self._capture_late_transcript_if_present(
+                    pre_record_text,
+                    source=f"late-poll-session-{session_id}",
+                )
+                if recovered:
+                    return
+            log.warning("Late transcription did not appear (session=%d)", session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("Late transcription recovery failed (session=%d): %s", session_id, e)
+        finally:
+            self.recovering = False
+
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
 
     async def toggle(self):
-        if not self.recording:
-            return await self.start_recording()
-        else:
-            return await self.stop_recording()
+        async with self._toggle_lock:
+            if self.processing or self.recovering:
+                status = "processing" if self.processing else "recovering"
+                platform_utils.send_notification(
+                    "Dictation still processing",
+                    "Wait for ChatGPT to finish before starting another session.",
+                    timeout=3,
+                )
+                log.info("Ignoring toggle while %s previous dictation", status)
+                return {"status": status}
+            if not self.recording:
+                return await self.start_recording()
+            else:
+                return await self.stop_recording()
 
     async def start_recording(self):
         log.info("Starting recording...")
         await self._ensure_page()
+
+        if self.processing or self.recovering:
+            status = "processing" if self.processing else "recovering"
+            log.info("Start requested while %s previous dictation", status)
+            return {"status": status}
+
+        if self._late_recovery_task and not self._late_recovery_task.done():
+            self._late_recovery_task.cancel()
+            try:
+                await self._late_recovery_task
+            except asyncio.CancelledError:
+                pass
+            log.info("Cancelled background late transcription poll before new recording")
+
+        recovered = await self._capture_late_transcript_if_present(
+            self._pre_record_text,
+            source="pre-start",
+        )
+        if recovered:
+            await asyncio.sleep(0.3)
+
         self._pre_record_text = await self._get_input_text()
         if self._pre_record_text:
             await self._clear_input()
@@ -428,6 +672,22 @@ class VoiceDaemon:
             await mic.click()
         else:
             log.info("Clicked mic button via JS (keyword=%s)", clicked)
+
+        observed = await self._wait_for_page_voice_state("recording", timeout=5.0)
+        if observed.get("observed") != "recording":
+            log.warning(
+                "Mic click did not start dictation; page state=%s buttons=%s",
+                observed.get("observed"),
+                observed.get("labels"),
+            )
+            self.recording = False
+            platform_utils.send_notification(
+                "Dictation did not start",
+                "ChatGPT did not enter recording mode.",
+                timeout=4,
+            )
+            return {"status": "not_recording"}
+
         self.recording = True
         log.info("Recording started")
         platform_utils.send_notification(
@@ -438,6 +698,24 @@ class VoiceDaemon:
     async def stop_recording(self):
         log.info("Stopping recording...")
         await self._ensure_page()
+        self._session_counter += 1
+        session_id = self._session_counter
+
+        observed_before = await self._get_page_voice_state()
+        if observed_before.get("observed") != "recording":
+            log.warning(
+                "Stop requested, but page is not recording (state=%s buttons=%s)",
+                observed_before.get("observed"),
+                observed_before.get("labels"),
+            )
+            self.recording = False
+            self.processing = False
+            platform_utils.send_notification(
+                "Dictation was not active",
+                "ChatGPT is not recording in the background browser.",
+                timeout=4,
+            )
+            return {"status": "not_recording"}
 
         stop = await self.find_element(self.config["selectors"]["stop_button"])
         if stop:
@@ -450,19 +728,46 @@ class VoiceDaemon:
                 await mic.click()
 
         self.recording = False
+        self.processing = True
 
         # Poll for transcribed text
         interval = self.config["post_stop_poll_interval_ms"] / 1000
         timeout = self.config["post_stop_poll_timeout_ms"] / 1000
+        idle_no_text_timeout = self.config.get("post_stop_idle_no_text_timeout_ms", 15000) / 1000
         elapsed = 0.0
         text = ""
+        no_recovery = False
 
-        while elapsed < timeout:
-            await asyncio.sleep(interval)
-            elapsed += interval
-            text = await self._get_input_text()
-            if text and text != self._pre_record_text:
-                break
+        try:
+            while elapsed < timeout:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                text = await self._get_input_text()
+                if text and text != self._pre_record_text:
+                    break
+                observed = await self._get_page_voice_state()
+                if (
+                    observed.get("observed") == "idle"
+                    and observed.get("textLength", 0) == 0
+                    and not observed.get("hasProcessing")
+                    and elapsed >= idle_no_text_timeout
+                ):
+                    log.warning(
+                        "ChatGPT is idle with no text after %.1fs; treating as no active transcription",
+                        elapsed,
+                    )
+                    no_recovery = True
+                    break
+                if observed.get("observed") == "unavailable":
+                    log.warning("Page became unavailable while processing; ending processing")
+                    no_recovery = True
+                    break
+        except Exception as e:
+            log.error("Processing failed while polling for transcript: %s", e)
+            text = ""
+            no_recovery = True
+        finally:
+            self.processing = False
 
         if text:
             platform_utils.copy_to_clipboard(text)
@@ -480,9 +785,27 @@ class VoiceDaemon:
             await self._clear_input()
             return {"status": "ok", "text": text, "pasted": pasted}
         else:
-            log.warning("No transcription text captured")
+            if no_recovery:
+                log.warning(
+                    "No transcription text captured after %.1fs; not starting late recovery",
+                    elapsed,
+                )
+                platform_utils.send_notification(
+                    "No active transcription",
+                    "ChatGPT returned idle without text.",
+                    timeout=4,
+                )
+                return {"status": "empty"}
+            log.warning(
+                "No transcription text captured after %.1fs; leaving composer intact for late recovery",
+                elapsed,
+            )
             platform_utils.send_notification(
-                "No text captured", "Try speaking louder or longer.",
+                "Still waiting for text",
+                "If ChatGPT finishes late, it will open in your text editor.",
+            )
+            self._late_recovery_task = asyncio.create_task(
+                self._poll_for_late_transcript(self._pre_record_text, session_id)
             )
             return {"status": "empty"}
 
@@ -505,7 +828,7 @@ class VoiceDaemon:
                 safe_result = {k: v for k, v in result.items() if k != "text"}
                 writer.write(json.dumps(safe_result).encode() + b"\n")
             elif cmd == "status":
-                state = "recording" if self.recording else "idle"
+                state = await self._status_state()
                 writer.write(json.dumps({"status": state}).encode() + b"\n")
             elif cmd == "quit":
                 writer.write(b'{"status":"bye"}\n')
@@ -604,6 +927,14 @@ class VoiceDaemon:
         if self._hotkey_listener:
             self._hotkey_listener.stop()
             self._hotkey_listener = None
+
+        if self._late_recovery_task:
+            self._late_recovery_task.cancel()
+            try:
+                await self._late_recovery_task
+            except asyncio.CancelledError:
+                pass
+            self._late_recovery_task = None
 
         if self.server:
             self.server.close()
