@@ -1,9 +1,11 @@
-"""CLI entry point: python -m chatgpt_voice {start|login|stop|toggle|status|visualizer}"""
+"""CLI entry point: python -m chatgpt_voice {start|login|stop|toggle|status|visualizer|settings}"""
 
 import asyncio
+import json
 import logging
 import subprocess
 import sys
+from pathlib import Path
 
 from .config import load_config
 from . import ipc
@@ -11,11 +13,24 @@ from .platform_utils import send_notification
 
 
 def _visualizer_pid_file():
-    from pathlib import Path
     if sys.platform == "win32":
         from .config import config_dir
         return config_dir() / "visualizer.pid"
     return Path("/tmp/chatgpt-voice-visualizer.pid")
+
+
+def _background_python() -> str:
+    """Return the interpreter that should run detached helper processes."""
+    exe = Path(sys.executable)
+    if sys.platform == "win32":
+        scripts_pythonw = Path(sys.prefix) / "Scripts" / "pythonw.exe"
+        if scripts_pythonw.exists():
+            return str(scripts_pythonw)
+        if exe.name.lower() == "python.exe":
+            pythonw = exe.with_name("pythonw.exe")
+            if pythonw.exists():
+                return str(pythonw)
+    return str(exe)
 
 
 def _start_visualizer_background():
@@ -25,7 +40,7 @@ def _start_visualizer_background():
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NO_WINDOW  # 0x08000000
         proc = subprocess.Popen(
-            [sys.executable, "-m", "chatgpt_voice", "visualizer"],
+            [_background_python(), "-m", "chatgpt_voice", "visualizer"],
             creationflags=creationflags,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -51,19 +66,12 @@ def _stop_visualizer():
         pf.unlink(missing_ok=True)
 
 
-def _setup_logging():
+def _setup_logging(config: dict | None = None):
     from logging.handlers import RotatingFileHandler
-    from pathlib import Path
-    import os
+    from .config import log_file
 
-    if sys.platform == "win32":
-        log_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "chatgpt-voice"
-    elif sys.platform == "darwin":
-        log_dir = Path.home() / "Library" / "Logs" / "chatgpt-voice"
-    else:
-        log_dir = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "chatgpt-voice"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "daemon.log"
+    log_path = log_file()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     file_handler = RotatingFileHandler(
@@ -73,8 +81,9 @@ def _setup_logging():
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(fmt)
 
+    diagnostics_enabled = bool((config or {}).get("diagnostics", {}).get("enabled", False))
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG if diagnostics_enabled else logging.INFO)
     # Clear any handlers from a prior basicConfig call
     for h in list(root.handlers):
         root.removeHandler(h)
@@ -85,7 +94,7 @@ def _setup_logging():
 def main(argv: list[str] | None = None):
     args = argv if argv is not None else sys.argv[1:]
     if not args:
-        print("Usage: python -m chatgpt_voice {start|login|stop|toggle|status|visualizer}")
+        print("Usage: python -m chatgpt_voice {start|login|stop|toggle|status|visualizer|settings|install-shortcuts|test-connection}")
         sys.exit(1)
 
     cmd = args[0]
@@ -95,8 +104,20 @@ def main(argv: list[str] | None = None):
         run_visualizer()
         return
 
-    _setup_logging()
+    if cmd == "settings":
+        from .settings_ui import run_settings_ui
+        run_settings_ui()
+        return
+
     config = load_config()
+    _setup_logging(config)
+
+    if cmd == "install-shortcuts":
+        from .shortcuts import install_windows_shortcuts
+        paths = install_windows_shortcuts()
+        for path in paths:
+            print(path)
+        return
 
     if cmd == "start":
         if ipc.is_daemon_running():
@@ -114,7 +135,8 @@ def main(argv: list[str] | None = None):
         if ipc.is_daemon_running():
             print("Stop the daemon first: python -m chatgpt_voice stop")
             sys.exit(1)
-        print("Opening browser for login. Log in to ChatGPT, then close the browser.")
+        provider = config["providers"][config["provider"]].get("name", config["provider"])
+        print(f"Opening browser for login. Log in to {provider}, then close the browser.")
         from .daemon import VoiceDaemon
         daemon = VoiceDaemon(config, visible=True)
         try:
@@ -137,16 +159,29 @@ def main(argv: list[str] | None = None):
         else:
             print("Daemon not running.")
 
+    elif cmd == "test-connection":
+        if ipc.is_daemon_running():
+            resp = ipc.send_command("test_connection", timeout=30)
+            if resp:
+                try:
+                    print(json.dumps(json.loads(resp), indent=2))
+                except json.JSONDecodeError:
+                    print(resp)
+            else:
+                print("No response.")
+        else:
+            print("Daemon not running. Start it first: python -m chatgpt_voice start")
+
     elif cmd == "toggle":
         if not ipc.is_daemon_running():
             print("Daemon not running. Start it first: python -m chatgpt_voice start")
             sys.exit(1)
-        resp = ipc.send_command("toggle")
+        resp = ipc.send_command("toggle", timeout=90)
         print(resp or "No response.")
 
     else:
         print(f"Unknown command: {cmd}")
-        print("Commands: start, login, stop, toggle, status, visualizer")
+        print("Commands: start, login, stop, toggle, status, visualizer, settings, install-shortcuts, test-connection")
         sys.exit(1)
 
 

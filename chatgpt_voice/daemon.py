@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from . import ipc, platform_utils
-from .config import data_dir, load_config, profile_dir
+from .config import data_dir, get_provider_config, load_config, profile_dir
 
 log = logging.getLogger("chatgpt-voice")
 
@@ -18,6 +18,11 @@ log = logging.getLogger("chatgpt-voice")
 class VoiceDaemon:
     def __init__(self, config: dict, visible: bool = False):
         self.config = config
+        self.provider = get_provider_config(config)
+        self.provider_id = self.provider["id"]
+        self.diagnostics_enabled = bool(
+            config.get("diagnostics", {}).get("enabled", False)
+        )
         self.visible = visible
         self.recording = False
         self.processing = False
@@ -33,6 +38,102 @@ class VoiceDaemon:
         self._late_recovery_task: asyncio.Task | None = None
         self._session_counter = 0
         self._last_page_state: str = "unknown"
+
+    def _apply_config(self, config: dict) -> None:
+        self.config = config
+        self.provider = get_provider_config(config)
+        self.provider_id = self.provider["id"]
+        self.diagnostics_enabled = bool(
+            config.get("diagnostics", {}).get("enabled", False)
+        )
+        logging.getLogger().setLevel(
+            logging.DEBUG if self.diagnostics_enabled else logging.INFO
+        )
+
+    def _provider_name(self) -> str:
+        return self.provider.get("name", self.provider_id)
+
+    def _provider_url(self) -> str:
+        return self.provider.get("url", "https://chatgpt.com/")
+
+    def _provider_selectors(self, group: str) -> list[str]:
+        selectors = self.provider.get("selectors", {}).get(group, [])
+        return [s for s in selectors if isinstance(s, str) and s.strip()]
+
+    def _provider_keywords(self, group: str) -> list[str]:
+        import re
+
+        keywords: list[str] = []
+        for keyword in self.provider.get("keywords", {}).get(group, []):
+            if isinstance(keyword, str) and keyword.strip():
+                keywords.append(keyword.strip().lower())
+        for selector in self._provider_selectors(group):
+            m = re.search(r'aria-label[*~|^$]?=\s*"([^"]+)"', selector)
+            if m:
+                keywords.append(m.group(1).strip().lower())
+
+        merged: list[str] = []
+        seen: set[str] = set()
+        for keyword in keywords:
+            if keyword and keyword not in seen:
+                merged.append(keyword)
+                seen.add(keyword)
+        return merged
+
+    def _ignored_button_label_prefixes(self) -> list[str]:
+        return [
+            "more options for",
+            "open conversation options for",
+            "pin ",
+            "unpin ",
+            "open project home",
+            "open project options for",
+            "open notebook actions",
+        ]
+
+    async def _query_any_selector(self, selectors: list[str]) -> bool:
+        return await self.page.evaluate("""(selectors) => {
+            for (const selector of selectors) {
+                try {
+                    if (document.querySelector(selector)) return true;
+                } catch (_) {}
+            }
+            return false;
+        }""", selectors)
+
+    async def _has_input_area(self) -> bool:
+        return await self._query_any_selector(self._provider_selectors("input_area"))
+
+    async def _is_login_required(self) -> bool:
+        selectors = self._provider_selectors("login_indicator")
+        keywords = self._provider_keywords("login")
+        input_selectors = self._provider_selectors("input_area")
+        mic_selectors = self._provider_selectors("mic_button")
+        return await self.page.evaluate("""({ selectors, keywords, inputSelectors, micSelectors }) => {
+            const hasProviderUi = (uiSelectors) => {
+                for (const selector of uiSelectors) {
+                    try {
+                        if (document.querySelector(selector)) return true;
+                    } catch (_) {}
+                }
+                return false;
+            };
+            if (hasProviderUi(inputSelectors) || hasProviderUi(micSelectors)) {
+                return false;
+            }
+            for (const selector of selectors) {
+                try {
+                    if (document.querySelector(selector)) return true;
+                } catch (_) {}
+            }
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            return keywords.some(keyword => bodyText.includes(keyword));
+        }""", {
+            "selectors": selectors,
+            "keywords": keywords,
+            "inputSelectors": input_selectors,
+            "micSelectors": mic_selectors,
+        })
 
     # ------------------------------------------------------------------
     # Browser helpers
@@ -100,6 +201,116 @@ class VoiceDaemon:
 
         return None
 
+    async def _click_provider_button(self, group: str) -> str | None:
+        selectors = self._provider_selectors(group)
+        keywords = self._provider_keywords(group)
+        return await self.page.evaluate("""({ selectors, keywords, group, ignoredLabelPrefixes }) => {
+            const labelFor = (button) => (button.getAttribute('aria-label') || button.innerText || '').trim();
+            const isControlLabel = (label) => {
+                const lower = label.toLowerCase();
+                return !!label
+                    && label.length <= 80
+                    && !ignoredLabelPrefixes.some(prefix => lower.startsWith(prefix))
+                    && !lower.includes('\\n');
+            };
+            const matchesKeyword = (label, keyword) => {
+                const lower = label.toLowerCase();
+                if (!isControlLabel(label)) return false;
+                if (group === 'stop_button' && keyword === 'stop') {
+                    return lower === 'stop'
+                        || lower.includes('stop listening')
+                        || lower.includes('stop recording')
+                        || lower.includes('stop speaking')
+                        || lower.includes('submit dictation');
+                }
+                if (group === 'mic_button') {
+                    return lower.includes(keyword)
+                        && !lower.includes('stop')
+                        && !lower.includes('submit');
+                }
+                return lower.includes(keyword);
+            };
+            const usableButton = (el) => {
+                const button = el.tagName === 'BUTTON' ? el : el.closest('button');
+                if (!button || button.disabled) return null;
+                const label = labelFor(button);
+                return isControlLabel(label) ? { button, label } : null;
+            };
+            for (const selector of selectors) {
+                try {
+                    for (const el of document.querySelectorAll(selector)) {
+                        const usable = usableButton(el);
+                        if (usable) {
+                            usable.button.click();
+                            return usable.label || selector;
+                        }
+                    }
+                } catch (_) {}
+            }
+            for (const keyword of keywords) {
+                for (const button of document.querySelectorAll('button')) {
+                    const label = labelFor(button);
+                    if (matchesKeyword(label, keyword)) {
+                        button.click();
+                        return label || keyword;
+                    }
+                }
+            }
+            return null;
+        }""", {
+            "selectors": selectors,
+            "keywords": keywords,
+            "group": group,
+            "ignoredLabelPrefixes": self._ignored_button_label_prefixes(),
+        })
+
+    async def _provider_button_exists(self, group: str) -> bool:
+        selectors = self._provider_selectors(group)
+        keywords = self._provider_keywords(group)
+        found = await self.page.evaluate("""({ selectors, keywords, group, ignoredLabelPrefixes }) => {
+            const labelFor = (button) => (button.getAttribute('aria-label') || button.innerText || '').trim();
+            const isControlLabel = (label) => {
+                const lower = label.toLowerCase();
+                return !!label
+                    && label.length <= 80
+                    && !ignoredLabelPrefixes.some(prefix => lower.startsWith(prefix))
+                    && !lower.includes('\\n');
+            };
+            const matchesKeyword = (label, keyword) => {
+                const lower = label.toLowerCase();
+                if (!isControlLabel(label)) return false;
+                if (group === 'stop_button' && keyword === 'stop') {
+                    return lower === 'stop'
+                        || lower.includes('stop listening')
+                        || lower.includes('stop recording')
+                        || lower.includes('stop speaking')
+                        || lower.includes('submit dictation');
+                }
+                if (group === 'mic_button') {
+                    return lower.includes(keyword)
+                        && !lower.includes('stop')
+                        && !lower.includes('submit');
+                }
+                return lower.includes(keyword);
+            };
+            for (const selector of selectors) {
+                try {
+                    for (const el of document.querySelectorAll(selector)) {
+                        const button = el.tagName === 'BUTTON' ? el : el.closest('button');
+                        if (button && !button.disabled && isControlLabel(labelFor(button))) return true;
+                    }
+                } catch (_) {}
+            }
+            return Array.from(document.querySelectorAll('button'))
+                .some(button => keywords.some(keyword => matchesKeyword(labelFor(button), keyword)));
+        }""", {
+            "selectors": selectors,
+            "keywords": keywords,
+            "group": group,
+            "ignoredLabelPrefixes": self._ignored_button_label_prefixes(),
+        })
+        return bool(found)
+
     async def start_browser(self):
         from playwright.async_api import async_playwright
 
@@ -139,7 +350,11 @@ class VoiceDaemon:
             document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
         """)
 
-        log.info("Navigating to %s", self.config["chatgpt_url"])
+        log.info(
+            "Navigating to %s provider at %s",
+            self._provider_name(),
+            self._provider_url(),
+        )
         # Retry transient network errors at login: DNS / NIC / VPN may not be
         # ready yet when the daemon starts. Backoff caps at ~60s total.
         transient_markers = (
@@ -159,7 +374,7 @@ class VoiceDaemon:
         for attempt in range(8):
             try:
                 await self.page.goto(
-                    self.config["chatgpt_url"], wait_until="domcontentloaded",
+                    self._provider_url(), wait_until="domcontentloaded",
                 )
                 last_error = None
                 break
@@ -182,15 +397,12 @@ class VoiceDaemon:
         log.info("Waiting for page to fully render...")
         for _ in range(20):  # up to 20 seconds
             await asyncio.sleep(1)
-            has_composer = await self.page.evaluate("""() => {
-                return !!document.querySelector('#prompt-textarea')
-                    || !!document.querySelector('div[contenteditable="true"]');
-            }""")
+            has_composer = await self._has_input_area()
             if has_composer:
-                log.info("Composer loaded")
+                log.info("%s composer loaded", self._provider_name())
                 break
         else:
-            log.warning("Composer not found after 20s, proceeding anyway")
+            log.warning("%s composer not found after 20s, proceeding anyway", self._provider_name())
 
         # Dismiss any modal overlays (voice picker, announcements, etc.)
         await self._dismiss_modals()
@@ -201,7 +413,7 @@ class VoiceDaemon:
         log.info("Browser ready (visible=%s)", self.visible)
         platform_utils.send_notification(
             "ChatGPT Voice Ready",
-            "Daemon started. Use hotkey to toggle recording.",
+            f"{self._provider_name()} provider ready. Use hotkey to toggle recording.",
             timeout=1,
         )
 
@@ -300,15 +512,10 @@ class VoiceDaemon:
                 document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
             """)
 
-            await self.page.goto(
-                self.config["chatgpt_url"], wait_until="domcontentloaded",
-            )
+            await self.page.goto(self._provider_url(), wait_until="domcontentloaded")
             for _ in range(20):
                 await asyncio.sleep(1)
-                has_composer = await self.page.evaluate("""() => {
-                    return !!document.querySelector('#prompt-textarea')
-                        || !!document.querySelector('div[contenteditable="true"]');
-                }""")
+                has_composer = await self._has_input_area()
                 if has_composer:
                     break
             await self._dismiss_modals()
@@ -322,54 +529,79 @@ class VoiceDaemon:
             raise
 
     async def _get_page_voice_state(self) -> dict:
-        """Return the ChatGPT page's observed dictation state.
+        """Return the provider page's observed dictation state.
 
         The daemon's internal state is useful for sequencing, but the page is
         the authority for whether dictation actually started.
         """
         try:
             state = await self.page.evaluate("""
-                () => {
+                ({ inputSelectors, micSelectors, stopSelectors, micKeywords, stopKeywords, recordingKeywords, processingKeywords, ignoredLabelPrefixes }) => {
+                    const buttonLabel = (button) => (button.getAttribute('aria-label') || button.innerText || '').trim();
+                    const isControlLabel = (label) => {
+                        const lower = label.toLowerCase();
+                        return !!label
+                            && label.length <= 80
+                            && !ignoredLabelPrefixes.some(prefix => lower.startsWith(prefix))
+                            && !lower.includes('\\n');
+                    };
+                    const matchesKeyword = (label, keyword, group) => {
+                        const lower = label.toLowerCase();
+                        if (!isControlLabel(label)) return false;
+                        if (group === 'stop' && keyword === 'stop') {
+                            return lower === 'stop'
+                                || lower.includes('stop listening')
+                                || lower.includes('stop recording')
+                                || lower.includes('stop speaking')
+                                || lower.includes('submit dictation');
+                        }
+                        return lower.includes(keyword);
+                    };
+                    const matchesButtonSelector = (selectors) => {
+                        for (const selector of selectors) {
+                            try {
+                                const buttons = Array.from(document.querySelectorAll(selector))
+                                    .filter(el => el.tagName === 'BUTTON' || el.closest('button'))
+                                    .map(el => el.tagName === 'BUTTON' ? el : el.closest('button'));
+                                if (buttons.some(button => isControlLabel(buttonLabel(button)))) return true;
+                            } catch (_) {}
+                        }
+                        return false;
+                    };
+                    const firstInput = () => {
+                        for (const selector of inputSelectors) {
+                            try {
+                                const el = document.querySelector(selector);
+                                if (el) return el;
+                            } catch (_) {}
+                        }
+                        return null;
+                    };
                     const labels = Array.from(document.querySelectorAll('button'))
                         .map(b => (b.getAttribute('aria-label') || b.innerText || '').trim())
                         .filter(Boolean);
-                    const lower = labels.map(label => label.toLowerCase());
-                    const bodyText = (document.body.innerText || '').toLowerCase();
+                    const controlLabels = labels.filter(isControlLabel);
+                    const lower = controlLabels.map(label => label.toLowerCase());
                     const busyNodes = Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-state="loading"]'));
-                    const hasStop = lower.some(label =>
-                        label.includes('stop dictation')
-                        || label.includes('submit dictation')
-                        || label.includes('stop recording')
-                    );
-                    const hasStart = lower.some(label =>
-                        (label.includes('start dictation')
-                            || label === 'dictate button'
-                            || label.includes('dictate'))
-                        && !label.includes('stop')
-                        && !label.includes('submit')
-                    );
-                    const hasProcessing = busyNodes.length > 0
+                    const hasStop = matchesButtonSelector(stopSelectors)
+                        || controlLabels.some(label => stopKeywords.some(keyword => matchesKeyword(label, keyword, 'stop')));
+                    const hasStart = matchesButtonSelector(micSelectors)
                         || lower.some(label =>
-                            label.includes('transcribing')
-                            || label.includes('processing')
-                            || label.includes('please wait')
-                            || label.includes('cancel dictation')
-                        )
-                        || bodyText.includes('transcribing')
-                        || bodyText.includes('processing dictation')
-                        || bodyText.includes('processing audio')
-                        || bodyText.includes('converting speech')
-                        || bodyText.includes('finishing dictation');
-                    const hasComposer = !!document.querySelector('#prompt-textarea')
-                        || !!document.querySelector('div[contenteditable="true"]')
-                        || !!document.querySelector('textarea');
+                            micKeywords.some(keyword => label.includes(keyword))
+                            && !label.includes('stop')
+                            && !label.includes('submit')
+                        );
+                    const hasRecording = lower.some(label =>
+                        recordingKeywords.some(keyword => matchesKeyword(label, keyword, 'recording'))
+                    );
+                    const hasProcessing = (busyNodes.length > 0 && !hasStart)
+                        || lower.some(label => processingKeywords.some(keyword => label.includes(keyword)));
+                    const input = firstInput();
+                    const hasComposer = !!input;
                     let text = '';
-                    const el = document.querySelector('#prompt-textarea')
-                        || document.querySelector('div[contenteditable="true"]')
-                        || document.querySelector('textarea');
-                    if (el) text = (el.innerText || el.value || '').trim();
+                    if (input) text = (input.innerText || input.value || '').trim();
                     let observed = 'unknown';
-                    if (hasStop) observed = 'recording';
+                    if (hasStop || hasRecording) observed = 'recording';
                     else if (hasProcessing) observed = 'processing';
                     else if (hasStart || hasComposer) observed = 'idle';
                     return {
@@ -379,11 +611,22 @@ class VoiceDaemon:
                         hasProcessing,
                         hasComposer,
                         textLength: text.length,
-                        labels,
+                        labels: controlLabels.slice(0, 50),
                     };
                 }
-            """)
+            """, {
+                "inputSelectors": self._provider_selectors("input_area"),
+                "micSelectors": self._provider_selectors("mic_button"),
+                "stopSelectors": self._provider_selectors("stop_button"),
+                "micKeywords": self._provider_keywords("mic_button"),
+                "stopKeywords": self._provider_keywords("stop_button"),
+                "recordingKeywords": self._provider_keywords("recording"),
+                "processingKeywords": self._provider_keywords("processing"),
+                "ignoredLabelPrefixes": self._ignored_button_label_prefixes(),
+            })
             self._last_page_state = state.get("observed", "unknown")
+            if self.diagnostics_enabled:
+                log.debug("Observed provider state: %s", state)
             return state
         except Exception as e:
             log.warning("Could not observe page dictation state: %s", e)
@@ -407,6 +650,25 @@ class VoiceDaemon:
             state = await self._get_page_voice_state()
         return state
 
+    def _is_idle_without_text(self, state: dict) -> bool:
+        return (
+            state.get("observed") == "idle"
+            and state.get("textLength", 0) == 0
+            and not state.get("hasProcessing")
+        )
+
+    async def _cancel_late_recovery(self, reason: str) -> None:
+        task = self._late_recovery_task
+        self.recovering = False
+        self._late_recovery_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        log.info("Cancelled late transcription recovery: %s", reason)
+
     async def _status_state(self) -> str:
         if self.recording:
             observed = await self._get_page_voice_state()
@@ -428,6 +690,31 @@ class VoiceDaemon:
                 return "processing"
             return "processing"
         if self.recovering:
+            observed = await self._get_page_voice_state()
+            if observed.get("observed") == "recording":
+                log.warning("Recovery state disagrees with page recording state; reporting recording")
+                await self._cancel_late_recovery("page is recording")
+                self.recording = True
+                return "recording"
+            if self._is_idle_without_text(observed):
+                log.warning("Recovery state ended because provider is idle with no text")
+                await self._cancel_late_recovery("provider idle with no text")
+                return "idle"
+            return "recovering"
+        if self.page:
+            observed = await self._get_page_voice_state()
+            if observed.get("observed") == "recording":
+                log.warning("Idle internal state disagrees with page recording state; reporting recording")
+                self.recording = True
+                return "recording"
+        return "idle"
+
+    def _quick_status_state(self) -> str:
+        if self.recording:
+            return "recording"
+        if self.processing:
+            return "processing"
+        if self.recovering:
             return "recovering"
         return "idle"
 
@@ -436,37 +723,52 @@ class VoiceDaemon:
     # ------------------------------------------------------------------
 
     async def _get_input_text(self):
-        """Read current text from ChatGPT's input area."""
+        """Read current text from the provider input area."""
         return await self.page.evaluate("""
-            () => {
-                const selectors = ['#prompt-textarea', 'div[contenteditable="true"]', 'textarea'];
-                for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        const text = (el.innerText || el.value || '').trim();
-                        if (text) return text;
-                    }
+            (selectors) => {
+                for (const selector of selectors) {
+                    try {
+                        const el = document.querySelector(selector);
+                        if (el) {
+                            const text = (el.innerText || el.value || '').trim();
+                            if (text) return text;
+                        }
+                    } catch (_) {}
                 }
                 return '';
             }
-        """)
+        """, self._provider_selectors("input_area"))
 
     async def _clear_input(self):
-        """Clear ChatGPT's input area."""
+        """Clear the provider input area."""
         await self.page.evaluate("""
-            () => {
-                const el = document.querySelector('#prompt-textarea')
-                         || document.querySelector('div[contenteditable="true"]');
+            (selectors) => {
+                let el = null;
+                for (const selector of selectors) {
+                    try {
+                        el = document.querySelector(selector);
+                        if (el) break;
+                    } catch (_) {}
+                }
                 if (el) {
                     if (el.tagName === 'TEXTAREA') {
                         el.value = '';
                     } else {
-                        el.innerHTML = '<p><br></p>';
+                        el.textContent = '';
+                        el.replaceChildren(document.createElement('br'));
                     }
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    try {
+                        el.dispatchEvent(new InputEvent('input', {
+                            bubbles: true,
+                            inputType: 'deleteContentBackward',
+                            data: null
+                        }));
+                    } catch (_) {
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
                 }
             }
-        """)
+        """, self._provider_selectors("input_area"))
 
     def _recovery_file(self):
         path = data_dir() / "recovered-transcripts.jsonl"
@@ -532,6 +834,57 @@ class VoiceDaemon:
             await self._clear_input()
         return text
 
+    def _transcript_ready_for_capture(
+        self,
+        text: str,
+        pre_record_text: str,
+        observed_state: str,
+        elapsed: float,
+        last_changed_at: float,
+        min_wait: float,
+        stable_wait: float,
+        busy_grace: float,
+    ) -> bool:
+        if not text or text == pre_record_text:
+            return False
+        if elapsed < min_wait:
+            return False
+        if elapsed - last_changed_at < stable_wait:
+            return False
+        if observed_state in ("recording", "processing") and elapsed < busy_grace:
+            return False
+        return True
+
+    def _post_stop_delay_ms(self, provider_key: str, legacy_key: str) -> int:
+        provider_value = self.provider.get("post_stop", {}).get(provider_key)
+        if isinstance(provider_value, (int, float)) and provider_value >= 0:
+            return int(provider_value)
+        return int(self.config.get(legacy_key, 0))
+
+    def _normalize_transcript_for_compare(self, text: str) -> str:
+        return " ".join((text or "").split())
+
+    def _choose_transcript_candidate(
+        self,
+        current_text: str,
+        best_text: str,
+        pre_record_text: str,
+    ) -> str:
+        current_text = current_text or ""
+        best_text = best_text or ""
+        if not current_text or current_text == pre_record_text:
+            return best_text
+        if not best_text:
+            return current_text
+
+        current_norm = self._normalize_transcript_for_compare(current_text)
+        best_norm = self._normalize_transcript_for_compare(best_text)
+        if best_norm.startswith(current_norm) and len(best_norm) > len(current_norm):
+            return best_text
+        if len(current_norm) > len(best_norm):
+            return current_text
+        return current_text
+
     async def _poll_for_late_transcript(self, pre_record_text: str, session_id: int):
         interval = self.config.get("late_transcript_poll_interval_ms", 1000) / 1000
         timeout = self.config.get("late_transcript_poll_timeout_ms", 300000) / 1000
@@ -561,6 +914,8 @@ class VoiceDaemon:
             log.error("Late transcription recovery failed (session=%d): %s", session_id, e)
         finally:
             self.recovering = False
+            if self._late_recovery_task is asyncio.current_task():
+                self._late_recovery_task = None
 
     # ------------------------------------------------------------------
     # Recording
@@ -568,28 +923,60 @@ class VoiceDaemon:
 
     async def toggle(self):
         async with self._toggle_lock:
-            if self.processing or self.recovering:
+            if self.recovering:
+                observed = await self._get_page_voice_state()
+                if observed.get("observed") == "recording":
+                    log.warning("Toggle requested during recovery, but provider is recording; stopping it")
+                    await self._cancel_late_recovery("toggle found active recording")
+                    self.recording = True
+                    self.processing = False
+                    return await self.stop_recording()
+                if self._is_idle_without_text(observed):
+                    log.warning("Toggle requested during stale recovery; provider is idle with no text")
+                    await self._cancel_late_recovery("toggle found provider idle with no text")
+                else:
+                    platform_utils.send_notification(
+                        "Dictation still processing",
+                        f"Wait for {self._provider_name()} to finish before starting another session.",
+                        timeout=3,
+                    )
+                    log.info("Ignoring toggle while recovering previous dictation")
+                    return {"status": "recovering"}
+            if self.processing:
                 status = "processing" if self.processing else "recovering"
                 platform_utils.send_notification(
                     "Dictation still processing",
-                    "Wait for ChatGPT to finish before starting another session.",
+                    f"Wait for {self._provider_name()} to finish before starting another session.",
                     timeout=3,
                 )
                 log.info("Ignoring toggle while %s previous dictation", status)
                 return {"status": status}
+            if not self.recording and self.page:
+                observed = await self._get_page_voice_state()
+                if observed.get("observed") == "recording":
+                    log.warning("Toggle requested while provider page is recording but internal state is idle")
+                    self.recording = True
+                    self.processing = False
+                    return await self.stop_recording()
             if not self.recording:
                 return await self.start_recording()
             else:
                 return await self.stop_recording()
 
     async def start_recording(self):
-        log.info("Starting recording...")
+        log.info("Starting recording with %s...", self._provider_name())
         await self._ensure_page()
 
         if self.processing or self.recovering:
             status = "processing" if self.processing else "recovering"
             log.info("Start requested while %s previous dictation", status)
             return {"status": status}
+
+        observed = await self._get_page_voice_state()
+        if observed.get("observed") == "recording":
+            log.warning("Start requested while provider page is already recording")
+            self.recording = True
+            return {"status": "recording", "message": "provider already recording"}
 
         if self._late_recovery_task and not self._late_recovery_task.done():
             self._late_recovery_task.cancel()
@@ -613,43 +1000,23 @@ class VoiceDaemon:
 
         # Poll via JS evaluate — the only method that reliably finds buttons
         # in minimized Chromium windows. Poll for up to 5 seconds.
-        import re as _re
-        keywords = []
-        for sel in self.config["selectors"]["mic_button"]:
-            m = _re.search(r'aria-label[*~|^$]?=\s*"([^"]+)"', sel)
-            if m:
-                keywords.append(m.group(1).lower())
         clicked = None
         for _i in range(150):  # 150 × 100ms = 15s
-            clicked = await self.page.evaluate("""(keywords) => {
-                for (const kw of keywords) {
-                    for (const btn of document.querySelectorAll('button')) {
-                        const label = (btn.getAttribute('aria-label') || btn.innerText || '').toLowerCase();
-                        if (label.includes(kw)) { btn.click(); return kw; }
-                    }
-                }
-                return null;
-            }""", keywords)
+            clicked = await self._click_provider_button("mic_button")
             if clicked:
                 log.info("Clicked mic button via JS after %d polls (keyword=%s)", _i + 1, clicked)
                 break
             await asyncio.sleep(0.1)
         if not clicked:
-            mic = await self.find_element(self.config["selectors"]["mic_button"])
+            mic = await self.find_element(self._provider_selectors("mic_button"))
             if not mic:
                 # Check if we need to log in
-                needs_login = await self.page.evaluate("""() => {
-                    return !!document.querySelector('[data-testid="login-button"]')
-                        || !!document.querySelector('button[data-action="click:login"]')
-                        || document.body.innerText.includes('Log in')
-                           && !document.querySelector('button[aria-label*="Dictate" i]')
-                           && !document.querySelector('button[aria-label*="dictation" i]');
-                }""")
+                needs_login = await self._is_login_required()
                 if needs_login:
-                    log.warning("ChatGPT session expired, showing browser for re-login")
+                    log.warning("%s session expired, showing browser for re-login", self._provider_name())
                     platform_utils.send_notification(
                         "Session expired",
-                        "Opening browser to re-login to ChatGPT...",
+                        f"Opening browser to re-login to {self._provider_name()}...",
                     )
                     await self._show_window()
                     return {"status": "login_required"}
@@ -667,13 +1034,16 @@ class VoiceDaemon:
                     log.error("Mic button not found. Available buttons: %s", btns)
                 except Exception:
                     log.error("Mic button not found and could not dump page buttons")
-                platform_utils.send_notification("Error", "Could not find microphone button.")
+                platform_utils.send_notification(
+                    "Error",
+                    f"Could not find {self._provider_name()} microphone button.",
+                )
                 return {"status": "error", "message": "mic button not found"}
             await mic.click()
         else:
             log.info("Clicked mic button via JS (keyword=%s)", clicked)
 
-        observed = await self._wait_for_page_voice_state("recording", timeout=5.0)
+        observed = await self._wait_for_page_voice_state("recording", timeout=12.0)
         if observed.get("observed") != "recording":
             log.warning(
                 "Mic click did not start dictation; page state=%s buttons=%s",
@@ -683,7 +1053,7 @@ class VoiceDaemon:
             self.recording = False
             platform_utils.send_notification(
                 "Dictation did not start",
-                "ChatGPT did not enter recording mode.",
+                f"{self._provider_name()} did not enter recording mode.",
                 timeout=4,
             )
             return {"status": "not_recording"}
@@ -696,7 +1066,7 @@ class VoiceDaemon:
         return {"status": "recording"}
 
     async def stop_recording(self):
-        log.info("Stopping recording...")
+        log.info("Stopping recording with %s...", self._provider_name())
         await self._ensure_page()
         self._session_counter += 1
         session_id = self._session_counter
@@ -712,20 +1082,20 @@ class VoiceDaemon:
             self.processing = False
             platform_utils.send_notification(
                 "Dictation was not active",
-                "ChatGPT is not recording in the background browser.",
+                f"{self._provider_name()} is not recording in the background browser.",
                 timeout=4,
             )
             return {"status": "not_recording"}
 
-        stop = await self.find_element(self.config["selectors"]["stop_button"])
-        if stop:
-            await stop.click()
-            log.info("Clicked stop button")
+        pre_stop_text = await self._get_input_text()
+        clicked = await self._click_provider_button("stop_button")
+        if clicked:
+            log.info("Clicked stop button (%s)", clicked)
         else:
             log.warning("No stop button found, trying mic button as toggle")
-            mic = await self.find_element(self.config["selectors"]["mic_button"])
-            if mic:
-                await mic.click()
+            clicked = await self._click_provider_button("mic_button")
+            if clicked:
+                log.info("Clicked mic button as stop toggle (%s)", clicked)
 
         self.recording = False
         self.processing = True
@@ -734,18 +1104,55 @@ class VoiceDaemon:
         interval = self.config["post_stop_poll_interval_ms"] / 1000
         timeout = self.config["post_stop_poll_timeout_ms"] / 1000
         idle_no_text_timeout = self.config.get("post_stop_idle_no_text_timeout_ms", 15000) / 1000
+        min_wait = self._post_stop_delay_ms("min_wait_ms", "post_stop_min_wait_ms") / 1000
+        stable_wait = self._post_stop_delay_ms("text_stable_ms", "post_stop_text_stable_ms") / 1000
+        busy_grace = self._post_stop_delay_ms("busy_grace_ms", "post_stop_busy_grace_ms") / 1000
         elapsed = 0.0
-        text = ""
+        text = pre_stop_text if pre_stop_text and pre_stop_text != self._pre_record_text else ""
+        last_text = pre_stop_text
+        last_changed_at = 0.0
         no_recovery = False
 
         try:
             while elapsed < timeout:
                 await asyncio.sleep(interval)
                 elapsed += interval
-                text = await self._get_input_text()
-                if text and text != self._pre_record_text:
-                    break
+                current_text = await self._get_input_text()
+                if current_text != last_text:
+                    previous_best = text
+                    last_text = current_text
+                    last_changed_at = elapsed
+                    text = self._choose_transcript_candidate(
+                        current_text,
+                        text,
+                        self._pre_record_text,
+                    )
+                    if text and text != self._pre_record_text and text != previous_best:
+                        log.debug(
+                            "Transcript candidate changed after stop (elapsed=%.1fs, len=%d, current_len=%d)",
+                            elapsed,
+                            len(text),
+                            len(current_text),
+                        )
                 observed = await self._get_page_voice_state()
+                if self._transcript_ready_for_capture(
+                    text=text,
+                    pre_record_text=self._pre_record_text,
+                    observed_state=observed.get("observed", "unknown"),
+                    elapsed=elapsed,
+                    last_changed_at=last_changed_at,
+                    min_wait=min_wait,
+                    stable_wait=stable_wait,
+                    busy_grace=busy_grace,
+                ):
+                    log.info(
+                        "Transcript stabilized after stop (elapsed=%.1fs, stable=%.1fs, state=%s, len=%d)",
+                        elapsed,
+                        elapsed - last_changed_at,
+                        observed.get("observed"),
+                        len(text),
+                    )
+                    break
                 if (
                     observed.get("observed") == "idle"
                     and observed.get("textLength", 0) == 0
@@ -753,7 +1160,8 @@ class VoiceDaemon:
                     and elapsed >= idle_no_text_timeout
                 ):
                     log.warning(
-                        "ChatGPT is idle with no text after %.1fs; treating as no active transcription",
+                        "%s is idle with no text after %.1fs; treating as no active transcription",
+                        self._provider_name(),
                         elapsed,
                     )
                     no_recovery = True
@@ -792,7 +1200,7 @@ class VoiceDaemon:
                 )
                 platform_utils.send_notification(
                     "No active transcription",
-                    "ChatGPT returned idle without text.",
+                    f"{self._provider_name()} returned idle without text.",
                     timeout=4,
                 )
                 return {"status": "empty"}
@@ -802,12 +1210,74 @@ class VoiceDaemon:
             )
             platform_utils.send_notification(
                 "Still waiting for text",
-                "If ChatGPT finishes late, it will open in your text editor.",
+                f"If {self._provider_name()} finishes late, it will open in your text editor.",
             )
             self._late_recovery_task = asyncio.create_task(
                 self._poll_for_late_transcript(self._pre_record_text, session_id)
             )
             return {"status": "empty"}
+
+    # ------------------------------------------------------------------
+    # Provider diagnostics
+    # ------------------------------------------------------------------
+
+    async def reload_config(self) -> dict:
+        """Reload config.json and navigate to the selected provider when idle."""
+        if self.recording or self.processing or self.recovering:
+            return {
+                "status": "busy",
+                "provider": self.provider_id,
+                "message": "Cannot reload provider while dictation is active.",
+            }
+
+        old_provider = self.provider_id
+        old_url = self._provider_url()
+        self._apply_config(load_config())
+        new_url = self._provider_url()
+
+        if self.page and (self.provider_id != old_provider or new_url != old_url):
+            log.info(
+                "Provider changed from %s to %s; navigating to %s",
+                old_provider,
+                self.provider_id,
+                new_url,
+            )
+            await self.page.goto(new_url, wait_until="domcontentloaded")
+            await self._dismiss_modals()
+            if not self.visible:
+                await self._minimize_window()
+
+        return {
+            "status": "ok",
+            "provider": self.provider_id,
+            "provider_name": self._provider_name(),
+            "diagnostics": self.diagnostics_enabled,
+        }
+
+    async def test_connection(self) -> dict:
+        """Inspect the current provider page without starting recording."""
+        await self._ensure_page()
+        state = await self._get_page_voice_state()
+        login_required = await self._is_login_required()
+        mic_found = await self._provider_button_exists("mic_button")
+        stop_found = await self._provider_button_exists("stop_button")
+        result = {
+            "status": "ok",
+            "provider": self.provider_id,
+            "provider_name": self._provider_name(),
+            "url": self._provider_url(),
+            "current_url": self.page.url,
+            "login_required": login_required,
+            "page_state": state.get("observed"),
+            "composer_found": state.get("hasComposer", False),
+            "mic_found": mic_found,
+            "stop_found": stop_found,
+            "diagnostics": self.diagnostics_enabled,
+        }
+        if self.diagnostics_enabled:
+            result["button_labels"] = state.get("labels", [])
+            log.debug("Connection test result: %s", result)
+        return result
 
     # ------------------------------------------------------------------
     # IPC handler
@@ -819,6 +1289,8 @@ class VoiceDaemon:
             cmd = data.decode().strip()
             if cmd == "status":
                 log.debug("Received command: %s", cmd)
+            elif cmd == "status_quick":
+                pass
             else:
                 log.info("Received command: %s", cmd)
 
@@ -829,7 +1301,23 @@ class VoiceDaemon:
                 writer.write(json.dumps(safe_result).encode() + b"\n")
             elif cmd == "status":
                 state = await self._status_state()
-                writer.write(json.dumps({"status": state}).encode() + b"\n")
+                writer.write(json.dumps({
+                    "status": state,
+                    "provider": self.provider_id,
+                    "provider_name": self._provider_name(),
+                }).encode() + b"\n")
+            elif cmd == "status_quick":
+                writer.write(json.dumps({
+                    "status": self._quick_status_state(),
+                    "provider": self.provider_id,
+                    "provider_name": self._provider_name(),
+                }).encode() + b"\n")
+            elif cmd == "reload_config":
+                result = await self.reload_config()
+                writer.write(json.dumps(result).encode() + b"\n")
+            elif cmd == "test_connection":
+                result = await self.test_connection()
+                writer.write(json.dumps(result).encode() + b"\n")
             elif cmd == "quit":
                 writer.write(b'{"status":"bye"}\n')
                 await writer.drain()
@@ -855,65 +1343,62 @@ class VoiceDaemon:
     async def run(self):
         self._shutdown_event = asyncio.Event()
 
-        await self.start_browser()
-
         self.server = await ipc.start_server(self.handle_client)
         ipc.write_pid()
 
-        log.info("Daemon running (PID %d)", __import__("os").getpid())
-
-        loop = asyncio.get_running_loop()
-
-        # Handle shutdown signals so Ctrl+C runs the cleanup path (close
-        # Chromium, drop PID file, stop hotkey listener) instead of dumping
-        # a KeyboardInterrupt traceback.
         tick_task = None
-        if sys.platform == "win32":
-            # On Windows asyncio's ProactorEventLoop ignores add_signal_handler.
-            # Use signal.signal() + a periodic wakeup so the handler runs while
-            # we're suspended on _shutdown_event.wait().
-            def _win_sig(_sig, _frame):
-                loop.call_soon_threadsafe(self._shutdown_event.set)
-            for _s in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
-                if _s is not None:
-                    try:
-                        signal.signal(_s, _win_sig)
-                    except (ValueError, OSError):
-                        pass
-
-            async def _tick():
-                while not self._shutdown_event.is_set():
-                    await asyncio.sleep(0.25)
-            tick_task = asyncio.create_task(_tick())
-        else:
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                loop.add_signal_handler(sig, self._shutdown_event.set)
-
-        # Register global hotkey (non-Wayland platforms).
-        # Capture the running loop here (main thread); the callback runs in pynput's
-        # thread and must schedule the coroutine on this loop, not get_event_loop().
-        hotkey_combo = self.config.get("hotkey", "ctrl+shift+.")
-
-        def _make_hotkey_handler(coro_func):
-            def handler():
-                fut = asyncio.run_coroutine_threadsafe(coro_func(), loop)
-                def _log_exc(f):
-                    if not f.cancelled() and f.exception():
-                        log.error("Hotkey handler error: %s", f.exception(), exc_info=f.exception())
-                fut.add_done_callback(_log_exc)
-            return handler
-
-        self._hotkey_listener = platform_utils.register_global_hotkey(
-            hotkey_combo,
-            _make_hotkey_handler(self.toggle),
-        )
-        if self._hotkey_listener:
-            log.info("Global hotkey registered: %s", hotkey_combo)
-
-        # Wait for shutdown signal. try/finally guarantees cleanup even if
-        # the wait is cancelled (e.g. KeyboardInterrupt propagating through
-        # asyncio.run on platforms where the signal handler couldn't fire).
         try:
+            await self.start_browser()
+
+            log.info("Daemon running (PID %d)", __import__("os").getpid())
+
+            loop = asyncio.get_running_loop()
+
+            # Handle shutdown signals so Ctrl+C runs the cleanup path (close
+            # Chromium, drop PID file, stop hotkey listener) instead of dumping
+            # a KeyboardInterrupt traceback.
+            if sys.platform == "win32":
+                # On Windows asyncio's ProactorEventLoop ignores add_signal_handler.
+                # Use signal.signal() + a periodic wakeup so the handler runs while
+                # we're suspended on _shutdown_event.wait().
+                def _win_sig(_sig, _frame):
+                    loop.call_soon_threadsafe(self._shutdown_event.set)
+                for _s in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+                    if _s is not None:
+                        try:
+                            signal.signal(_s, _win_sig)
+                        except (ValueError, OSError):
+                            pass
+
+                async def _tick():
+                    while not self._shutdown_event.is_set():
+                        await asyncio.sleep(0.25)
+                tick_task = asyncio.create_task(_tick())
+            else:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    loop.add_signal_handler(sig, self._shutdown_event.set)
+
+            # Register global hotkey (non-Wayland platforms).
+            # Capture the running loop here (main thread); the callback runs in pynput's
+            # thread and must schedule the coroutine on this loop, not get_event_loop().
+            hotkey_combo = self.config.get("hotkey", "ctrl+shift+.")
+
+            def _make_hotkey_handler(coro_func):
+                def handler():
+                    fut = asyncio.run_coroutine_threadsafe(coro_func(), loop)
+                    def _log_exc(f):
+                        if not f.cancelled() and f.exception():
+                            log.error("Hotkey handler error: %s", f.exception(), exc_info=f.exception())
+                    fut.add_done_callback(_log_exc)
+                return handler
+
+            self._hotkey_listener = platform_utils.register_global_hotkey(
+                hotkey_combo,
+                _make_hotkey_handler(self.toggle),
+            )
+            if self._hotkey_listener:
+                log.info("Global hotkey registered: %s", hotkey_combo)
+
             await self._shutdown_event.wait()
         finally:
             if tick_task is not None:

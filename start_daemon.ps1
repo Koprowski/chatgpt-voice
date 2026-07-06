@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $PYTHON = Join-Path $DIR "venv\Scripts\python.exe"
-$LOG = Join-Path $env:APPDATA "chatgpt-voice\daemon.log"
+$LOG = Join-Path $env:LOCALAPPDATA "chatgpt-voice\daemon.log"
 
 $null = New-Item -Force -ItemType Directory (Split-Path $LOG)
 

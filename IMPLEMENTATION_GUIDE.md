@@ -2,9 +2,11 @@
 
 ## Overview
 
-A background daemon that piggybacks ChatGPT's web-based voice transcription (server-side Whisper) to provide system-wide dictation. Press a keyboard shortcut to start recording, press again to stop — transcribed text is copied to clipboard and auto-pasted into the currently focused text field.
+A background daemon that piggybacks a supported web dictation provider to provide system-wide dictation. ChatGPT is the default provider; Gemini can also be selected in the settings UI. Press a keyboard shortcut to start recording, press again to stop, and the transcribed text is copied to clipboard and auto-pasted into the currently focused text field.
 
-**Requirements:** You must be signed into a **paid ChatGPT account** (e.g. ChatGPT Plus). Voice dictation in the ChatGPT web UI is available to paid subscribers. See [LEGAL.md](LEGAL.md) for terms and disclaimer.
+**Requirements:** The selected provider must expose voice dictation to your signed-in account. See [LEGAL.md](LEGAL.md) for terms and disclaimer.
+
+**Provider selection:** ChatGPT is the default provider. The settings UI can switch the daemon to Gemini, which uses `https://gemini.google.com/` and requires a signed-in Google account in the Playwright browser profile.
 
 **Supported platforms:** Linux (Wayland/X11), Windows, macOS.
 
@@ -22,7 +24,7 @@ A background daemon that piggybacks ChatGPT's web-based voice transcription (ser
 ┌──────────────────────────────────────────────────────────────┐
 │  VoiceDaemon (Python asyncio)                                │
 │  ├─ Playwright persistent Chromium (minimized)               │
-│  │  └─ ChatGPT tab with visibility API override              │
+│  │  └─ Provider tab with visibility API override             │
 │  ├─ IPC server (Unix socket / TCP 127.0.0.1:52384)          │
 │  ├─ Clipboard (wl-copy / xclip / pyperclip / pbcopy)        │
 │  └─ Paste injection (evdev / pynput)                         │
@@ -32,7 +34,7 @@ A background daemon that piggybacks ChatGPT's web-based voice transcription (ser
 **Flow:**
 1. User presses hotkey from any application
 2. Hotkey fires toggle → sends `toggle` to daemon via IPC
-3. Daemon uses Playwright to click ChatGPT's microphone button in a minimized Chromium instance
+3. Daemon uses Playwright to click the active provider's microphone button in a minimized Chromium instance
 4. User speaks
 5. User presses hotkey again
 6. Daemon clicks stop, polls for transcribed text in the input area
@@ -68,7 +70,7 @@ A background daemon that piggybacks ChatGPT's web-based voice transcription (ser
 | Notifications | `notify-send` | `notify-send` | `plyer` / PowerShell toast | `osascript` |
 | Global hotkey | None (GNOME gsettings) | `pynput` | `pynput` | `pynput` |
 | IPC | Unix socket | Unix socket | TCP `127.0.0.1:52384` | Unix socket |
-| Config dir | `~/.config/chatgpt-voice/` | same | `%APPDATA%/chatgpt-voice/` | `~/Library/Application Support/chatgpt-voice/` |
+| Config dir | `~/.config/chatgpt-voice/` | same | `%LOCALAPPDATA%/chatgpt-voice/` | `~/Library/Application Support/chatgpt-voice/` |
 | Data dir | `~/.local/share/chatgpt-voice/` | same | `%LOCALAPPDATA%/chatgpt-voice/` | `~/Library/Application Support/chatgpt-voice/` |
 
 ## Environment
@@ -135,7 +137,7 @@ powershell -ExecutionPolicy Bypass -File setup_windows.ps1
 ### All platforms — first login
 ```bash
 python -m chatgpt_voice login
-# Log in to ChatGPT in the browser, then Ctrl+C
+# Log in to the selected provider in the browser, then Ctrl+C
 ```
 
 ## Usage
@@ -152,6 +154,12 @@ python -m chatgpt_voice status
 
 # Manual toggle
 python -m chatgpt_voice toggle
+
+# Open provider/settings control panel
+python -m chatgpt_voice settings
+
+# Test the active provider through the running daemon
+python -m chatgpt_voice test-connection
 ```
 
 ### Linux systemd service (auto-start on login)
@@ -181,11 +189,22 @@ systemctl --user start chatgpt-voice.service
 
 ## Configuration
 
-`config.json` is created on first run in the platform-appropriate config directory. Update selectors here when ChatGPT changes their UI:
+`config.json` is created on first run in the platform-appropriate config directory. Use the settings UI for provider and diagnostics changes. Update selectors here when a provider changes its UI:
 
 ```json
 {
-  "chatgpt_url": "https://chatgpt.com/",
+  "provider": "chatgpt",
+  "providers": {
+    "chatgpt": {
+      "name": "ChatGPT",
+      "url": "https://chatgpt.com/"
+    },
+    "gemini": {
+      "name": "Gemini",
+      "url": "https://gemini.google.com/"
+    }
+  },
+  "diagnostics": { "enabled": false },
   "hotkey": "ctrl+shift+.",
   "selectors": {
     "mic_button": [
@@ -210,6 +229,8 @@ systemctl --user start chatgpt-voice.service
 }
 ```
 
+The legacy `chatgpt_url` and top-level `selectors` keys still work and are folded into the ChatGPT provider for existing installs.
+
 The `hotkey` field is used by pynput on non-Wayland platforms. On Linux Wayland, the hotkey is configured via GNOME keyboard shortcuts (set by `setup.sh`).
 
 ## Troubleshooting
@@ -233,21 +254,21 @@ The `hotkey` field is used by pynput on non-Wayland platforms. On Linux Wayland,
 - Try running with admin/elevated privileges once
 
 **Long recording finishes but nothing pastes:**
-- Check the daemon log for `No transcription text captured after ...`; on Windows the log is `%APPDATA%/chatgpt-voice/daemon.log`
-- If ChatGPT finishes late, the daemon opens the recovered text in your default text editor, saves a `.txt` copy under `%LOCALAPPDATA%/chatgpt-voice/recovered-transcripts/`, and appends it to `%LOCALAPPDATA%/chatgpt-voice/recovered-transcripts.jsonl`
-- While ChatGPT is processing or recovering a late transcript, extra hotkey presses are ignored so the visualizer and ChatGPT do not drift into opposite states
-- If ChatGPT visibly keeps processing/transcribing, the daemon keeps showing processing. If ChatGPT returns to idle with no text and no processing indicator for `post_stop_idle_no_text_timeout_ms`, the daemon treats the attempt as inactive instead of showing processing until the full timeout
+- Check the daemon log for `No transcription text captured after ...`; on Windows the log is `%LOCALAPPDATA%/chatgpt-voice/daemon.log`
+- If the provider finishes late, the daemon opens the recovered text in your default text editor, saves a `.txt` copy under `%LOCALAPPDATA%/chatgpt-voice/recovered-transcripts/`, and appends it to `%LOCALAPPDATA%/chatgpt-voice/recovered-transcripts.jsonl`
+- While the provider is processing or recovering a late transcript, extra hotkey presses are ignored so the visualizer and provider state do not drift into opposite states
+- If the provider visibly keeps processing/transcribing, the daemon keeps showing processing. If the provider returns to idle with no text and no processing indicator for `post_stop_idle_no_text_timeout_ms`, the daemon treats the attempt as inactive instead of showing processing until the full timeout
 
-**ChatGPT session expired:**
+**Provider session expired:**
 - Stop daemon, run `python -m chatgpt_voice login`, re-authenticate, Ctrl+C, restart daemon
 
 ## Technologies Used
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Browser automation | Playwright (Python) | Control minimized Chromium with ChatGPT |
-| Browser engine | Chromium (Playwright-managed) | Hosts ChatGPT with persistent login |
-| Speech-to-text | ChatGPT's server-side Whisper | Free, fast, accurate transcription |
+| Browser automation | Playwright (Python) | Control minimized Chromium with the active provider |
+| Browser engine | Chromium (Playwright-managed) | Hosts the selected provider with persistent login |
+| Speech-to-text | Provider web dictation | Uses ChatGPT or Gemini transcription through the web UI |
 | IPC | asyncio Unix socket / TCP | Communication between trigger and daemon |
 | Clipboard | wl-copy / xclip / pyperclip / pbcopy | Set system clipboard contents |
 | Keystroke injection | evdev uinput / pynput | Simulate paste keystroke |

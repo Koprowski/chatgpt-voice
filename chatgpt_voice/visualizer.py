@@ -59,7 +59,7 @@ def _get_status() -> str | None:
     if not ipc.is_daemon_running():
         return None
     try:
-        resp = ipc.send_command("status", timeout=2)
+        resp = ipc.send_command("status_quick", timeout=2)
         if resp:
             data = json.loads(resp.strip())
             return data.get("status")

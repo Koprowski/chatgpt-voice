@@ -1,4 +1,4 @@
-# Create Startup shortcuts: daemon (hidden, logs to file) + recording visualizer.
+# Create Startup shortcut: daemon (hidden, logs to file).
 # Run from the chatgpt-voice folder: powershell -ExecutionPolicy Bypass -File install_startup.ps1
 # Uses this folder's venv (run from your install directory).
 
@@ -14,7 +14,7 @@ if (-not (Test-Path $PYTHON)) {
 }
 
 $STARTUP = [Environment]::GetFolderPath("Startup")
-$LOG = Join-Path $env:APPDATA "chatgpt-voice\daemon.log"
+$LOG = Join-Path $env:LOCALAPPDATA "chatgpt-voice\daemon.log"
 $LAUNCHER = Join-Path $DIR "start_daemon.ps1"
 
 # Write a portable launcher script that runs the daemon hidden and logs all output.
@@ -23,7 +23,7 @@ $ErrorActionPreference = "Stop"
 
 $DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $PYTHON = Join-Path $DIR "venv\Scripts\python.exe"
-$LOG = Join-Path $env:APPDATA "chatgpt-voice\daemon.log"
+$LOG = Join-Path $env:LOCALAPPDATA "chatgpt-voice\daemon.log"
 
 $null = New-Item -Force -ItemType Directory (Split-Path $LOG)
 
@@ -57,16 +57,15 @@ if (Test-Path $OldShortcut) {
     Write-Host "Removed old: ChatGPT Voice (Terminal).lnk" -ForegroundColor Yellow
 }
 
-# 2. Recording visualizer (no terminal; small wave window only when recording)
-$Shortcut2 = $WScript.CreateShortcut((Join-Path $STARTUP "ChatGPT Voice Visualizer.lnk"))
-$Shortcut2.TargetPath = $PYTHONW
-$Shortcut2.Arguments = "-m chatgpt_voice visualizer"
-$Shortcut2.WorkingDirectory = $DIR
-$Shortcut2.Description = "ChatGPT Voice recording indicator (wave when recording)"
-$Shortcut2.Save()
-Write-Host "Created: ChatGPT Voice Visualizer.lnk" -ForegroundColor Green
+# Remove legacy standalone visualizer startup shortcut. The daemon launches
+# the visualizer with the same interpreter and working directory it uses.
+$OldVisualizerShortcut = Join-Path $STARTUP "ChatGPT Voice Visualizer.lnk"
+if (Test-Path $OldVisualizerShortcut) {
+    Remove-Item $OldVisualizerShortcut
+    Write-Host "Removed old: ChatGPT Voice Visualizer.lnk" -ForegroundColor Yellow
+}
 
-# 3. Start Menu shortcuts (for manual launch without rebooting)
+# 2. Start Menu shortcuts (for manual launch without rebooting)
 $STARTMENU = Join-Path ([Environment]::GetFolderPath("Programs")) "ChatGPT Voice"
 New-Item -ItemType Directory -Path $STARTMENU -Force | Out-Null
 
@@ -77,26 +76,30 @@ $smDaemon.WorkingDirectory = $DIR
 $smDaemon.Description = "Launch ChatGPT Voice daemon (hidden, logs to $LOG)"
 $smDaemon.Save()
 
-$smVis = $WScript.CreateShortcut((Join-Path $STARTMENU "ChatGPT Voice Visualizer.lnk"))
-$smVis.TargetPath = $PYTHONW
-$smVis.Arguments = "-m chatgpt_voice visualizer"
-$smVis.WorkingDirectory = $DIR
-$smVis.Description = "Launch ChatGPT Voice visualizer overlay"
-$smVis.Save()
+$OldStartMenuVisualizer = Join-Path $STARTMENU "ChatGPT Voice Visualizer.lnk"
+if (Test-Path $OldStartMenuVisualizer) {
+    Remove-Item $OldStartMenuVisualizer
+    Write-Host "Removed old Start Menu visualizer shortcut" -ForegroundColor Yellow
+}
 
 $smRestart = $WScript.CreateShortcut((Join-Path $STARTMENU "ChatGPT Voice (Restart).lnk"))
 $smRestart.TargetPath = "powershell.exe"
 $smRestart.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $DIR 'restart.ps1')`""
 $smRestart.WorkingDirectory = $DIR
-$smRestart.Description = "Kill and relaunch ChatGPT Voice daemon + visualizer"
+$smRestart.Description = "Kill and relaunch ChatGPT Voice daemon"
 $smRestart.Save()
 
 Write-Host "Created Start Menu shortcuts under 'ChatGPT Voice'" -ForegroundColor Green
 
+# 3. Desktop control-panel shortcut (provider/settings/diagnostics)
+& $PYTHON -m chatgpt_voice install-shortcuts | ForEach-Object {
+    Write-Host "Created/updated shortcut: $_" -ForegroundColor Green
+}
+
 [System.Runtime.Interopservices.Marshal]::ReleaseComObject($WScript) | Out-Null
 
 Write-Host ""
-Write-Host "On login: daemon runs hidden; visualizer shows a wave window when recording." -ForegroundColor Cyan
+Write-Host "On login: daemon runs hidden and launches the visualizer helper." -ForegroundColor Cyan
 Write-Host "When you press Ctrl+Shift+. and record, a small wave window appears." -ForegroundColor Cyan
 Write-Host "Daemon log: $LOG" -ForegroundColor Cyan
 Write-Host "To remove: delete the shortcuts from $STARTUP" -ForegroundColor Gray

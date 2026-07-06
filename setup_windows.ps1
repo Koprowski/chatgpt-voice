@@ -25,13 +25,13 @@ Write-Host "[3/5] Installing Playwright Chromium..."
 
 # 4. Create config directory
 Write-Host "[4/5] Creating config directory..."
-$CONFIG_DIR = Join-Path $env:APPDATA "chatgpt-voice"
+$CONFIG_DIR = Join-Path $env:LOCALAPPDATA "chatgpt-voice"
 if (-not (Test-Path $CONFIG_DIR)) {
     New-Item -ItemType Directory -Path $CONFIG_DIR -Force | Out-Null
 }
 
 # 5. Create startup shortcut (optional)
-Write-Host "[5/5] Creating startup shortcut..."
+Write-Host "[5/6] Creating startup shortcut..."
 $STARTUP = [Environment]::GetFolderPath("Startup")
 $SHORTCUT_PATH = Join-Path $STARTUP "ChatGPT Voice.lnk"
 
@@ -48,18 +48,26 @@ if (-not (Test-Path $SHORTCUT_PATH)) {
     Write-Host "  Startup shortcut already exists."
 }
 
+# 6. Create desktop and Start Menu shortcuts
+Write-Host "[6/6] Creating desktop and settings shortcuts..."
+& "$VENV\Scripts\python.exe" -m chatgpt_voice install-shortcuts | ForEach-Object {
+    Write-Host "  Shortcut: $_"
+}
+
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Log in to ChatGPT (one-time; requires paid account, e.g. Plus):"
+Write-Host "  1. Log in to the selected provider:"
 Write-Host "     $VENV\Scripts\python.exe -m chatgpt_voice login"
-Write-Host "     (Sign in with your paid ChatGPT account in the browser that opens, then Ctrl+C)"
+Write-Host "     (Sign in with the provider account in the browser that opens, then Ctrl+C)"
 Write-Host ""
 Write-Host "  2. Start the daemon:"
 Write-Host "     $VENV\Scripts\python.exe -m chatgpt_voice start"
 Write-Host ""
-Write-Host "  3. Press Ctrl+Shift+. to toggle voice recording"
+Write-Host "  3. Or open the desktop icon for settings, provider selection, diagnostics, and connection tests."
+Write-Host ""
+Write-Host "  4. Press Ctrl+Shift+. to toggle voice recording"
 Write-Host "     (Global hotkey is registered automatically by the daemon)"
 Write-Host ""
 Write-Host "  To stop the daemon:"

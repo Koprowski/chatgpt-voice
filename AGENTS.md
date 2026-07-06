@@ -4,6 +4,8 @@ This repo is Jason's system-wide voice dictation tool. It is an active daily-use
 
 Read README.md, IMPLEMENTATION_GUIDE.md, and LEGAL.md as needed before making behavior or packaging changes.
 
+Increment the app version by `0.0.1` with every commit.
+
 ## Planning System: Mission Control vs GitHub
 
 `MC` means Mission Control.
