@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chatgpt-voice"
-version = "0.2.1"
+version = "0.2.2"
 description = "System-wide voice dictation via ChatGPT's web transcription"
 requires-python = ">=3.11"
 dependencies = [

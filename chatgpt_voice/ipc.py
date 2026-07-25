@@ -1,4 +1,4 @@
-"""IPC layer — Unix socket (Linux/macOS) or TCP localhost (Windows)."""
+"""IPC layer - Unix socket (Linux/macOS) or TCP localhost (Windows)."""
 
 import asyncio
 import json
@@ -90,10 +90,33 @@ def send_command(cmd: str, timeout: float = 15) -> str | None:
         sock.close()
 
 
+def _tcp_daemon_responds(timeout: float = 0.5) -> bool:
+    """Return True only when the Windows daemon IPC server answers status."""
+    try:
+        with socket.create_connection(("127.0.0.1", _TCP_PORT), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(b"status_quick")
+            resp = sock.recv(4096).decode().strip()
+    except OSError:
+        return False
+
+    if not resp:
+        return False
+    try:
+        data = json.loads(resp)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and "status" in data
+
+
 def is_daemon_running() -> bool:
+    if platform_utils.PLATFORM == "windows" and _tcp_daemon_responds():
+        return True
+
     pf = _pid_file()
     if not pf.exists():
         return False
+
     try:
         pid = int(pf.read_text().strip())
     except (ValueError, OSError):
@@ -108,7 +131,10 @@ def is_daemon_running() -> bool:
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if handle:
             kernel32.CloseHandle(handle)
-            return True
+            if _tcp_daemon_responds():
+                return True
+            pf.unlink(missing_ok=True)
+            return False
         pf.unlink(missing_ok=True)
         return False
     else:
